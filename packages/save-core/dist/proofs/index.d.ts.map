@@ -1,1 +1,0 @@
-{"version":3,"file":"index.d.ts","sourceRoot":"","sources":["../../src/proofs/index.ts"],"names":[],"mappings":"AAAA;;GAEG;AAEH,OAAO,EACL,SAAS,EACT,oBAAoB,EACpB,mBAAmB,GACpB,MAAM,gBAAgB,CAAC;AAExB,OAAO,EACL,sBAAsB,EACtB,iBAAiB,GAClB,MAAM,iBAAiB,CAAC;AAEzB,YAAY,EAAE,gBAAgB,EAAE,MAAM,gBAAgB,CAAC;AACvD,YAAY,EAAE,6BAA6B,EAAE,wBAAwB,EAAE,MAAM,iBAAiB,CAAC"}
