@@ -1,0 +1,47 @@
+# ==========================================================================
+# CRE PROJECT SETTINGS FILE — Midas NAV PoR
+# ==========================================================================
+
+# ==========================================================================
+por-attester-dev:
+  rpcs:
+    - chain-name: ethereum-testnet-sepolia
+      url: https://ethereum-sepolia-rpc.publicnode.com
+    - chain-name: ethereum-mainnet
+      url: https://ethereum-rpc.publicnode.com
+
+# ==========================================================================
+por-attester-test:
+  rpcs:
+    - chain-name: ethereum-testnet-sepolia
+      url: https://ethereum-sepolia-rpc.publicnode.com
+    - chain-name: ethereum-mainnet
+      url: https://ethereum-rpc.publicnode.com
+
+# ==========================================================================
+por-attester-prod:
+  rpcs:
+    - chain-name: ethereum-mainnet
+      url: https://ethereum-rpc.publicnode.com
+
+# ==========================================================================
+por-verifier-dev:
+  rpcs:
+    - chain-name: ethereum-testnet-sepolia
+      url: https://ethereum-sepolia-rpc.publicnode.com
+    - chain-name: ethereum-mainnet
+      url: https://ethereum-rpc.publicnode.com
+
+# ==========================================================================
+por-verifier-test:
+  rpcs:
+    - chain-name: ethereum-testnet-sepolia
+      url: https://ethereum-sepolia-rpc.publicnode.com
+    - chain-name: ethereum-mainnet
+      url: https://ethereum-rpc.publicnode.com
+
+# ==========================================================================
+por-verifier-prod:
+  rpcs:
+    - chain-name: ethereum-mainnet
+      url: https://ethereum-rpc.publicnode.com

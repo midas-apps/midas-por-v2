@@ -1,0 +1,146 @@
+import { z } from 'zod'
+import {
+	EVM_CONFIDENCE_LEVELS,
+	type EVMConfidenceLevel,
+	logTriggerConfigSchema,
+	registryConfigSchema,
+	ipfsHttpEndpointSchema,
+	getNetworkByChainSelector,
+} from '../library/config-schemas.js'
+
+export { EVM_CONFIDENCE_LEVELS, type EVMConfidenceLevel, getNetworkByChainSelector }
+
+const vlayerEndpointSchema = z
+	.object({ url: z.string(), clientId: z.string() })
+	.refine((d) => /^https?:\/\/.+/.test(d.url), { message: 'Invalid URL', path: ['url'] })
+
+const attesterConfigSchema = z
+	.object({ publicKey: z.string() })
+	.refine((d) => /^0x[a-fA-F0-9]+$/.test(d.publicKey), {
+		message: 'Invalid public key format (must be 0x + hex)',
+		path: ['publicKey'],
+	})
+
+const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+const domainRegex = /^@[^\s@]+\.[^\s@]+$/  // e.g. @fasanara.com
+
+const fundManagerConfigSchema = z
+	.object({
+		expectedEmail: z.string(),
+		requiredReceiverEmail: z.string(),
+		allowedReceiverEmails: z.array(z.string()).default([]),
+		tokenName: z.string(),
+		navFields: z.array(z.string()).min(1),
+		navIsTotal: z.boolean().default(false),
+	})
+	.refine((d) => emailRegex.test(d.expectedEmail) || domainRegex.test(d.expectedEmail), {
+		message: 'Invalid sender email (must be a full email or a domain like @fasanara.com)',
+		path: ['expectedEmail'],
+	})
+	.refine((d) => emailRegex.test(d.requiredReceiverEmail), {
+		message: 'Invalid required receiver email',
+		path: ['requiredReceiverEmail'],
+	})
+
+const oneTokenApiSchema = z.object({
+	tokenName: z.string(),
+	useNavBase: z.boolean().default(false),
+	// Hours back to try when fetching the 1token snapshot, in priority order.
+	// Each entry costs one HTTP call (max budget concern). Workflow stops at the
+	// first successful fetch. Default `[0, 1]` tries the exact hour, then -1h.
+	// For tokens where 1token data is known to lag, set e.g. `[4]` for a single
+	// -4h shot or `[0, 4]` to try fresh then fall back to 4h-old data.
+	timestampOffsetHoursBack: z.array(z.number().int().nonnegative()).default([0, 1]),
+})
+
+const tokenRegistrySchema = z
+	.object({
+		url: z.string(),
+		fallbackUrl: z.string().optional(),
+	})
+	.refine((d) => /^https?:\/\/.+/.test(d.url), { message: 'Invalid URL', path: ['url'] })
+
+const ipfsPinataEndpointSchema = z
+	.object({ url: z.string() })
+	.refine((d) => /^https?:\/\/.+/.test(d.url), { message: 'Invalid URL', path: ['url'] })
+
+const httpTriggerConfigSchema = z
+	.object({
+		authorizedKeys: z
+			.array(z.object({ type: z.literal('KEY_TYPE_ECDSA_EVM'), publicKey: z.string() }))
+			.optional(),
+	})
+	.optional()
+
+/**
+ * Per-token configuration — add a new entry here to support a new token.
+ * Key is the proofId (bytes32 hex, lowercase): sha256(proofName)
+ */
+const supplyTokenSchema = z.object({
+	address: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+	decimals: z.number().default(18),
+	chainSelectorName: z.string().default('ethereum-mainnet'),
+})
+export type SupplyTokenConfig = z.infer<typeof supplyTokenSchema>
+
+// Pending redemption can be composed from one or both sources, summed together.
+const pendingRedemptionSourceSchema = z
+	.object({
+		// 1token wallet pattern (case-insensitive substring on the wallet label).
+		oneTokenWalletPattern: z.string().optional(),
+		// Email field name(s) to extract from vlayer fund manager email claim.
+		emailFields: z.array(z.string()).min(1).optional(),
+	})
+	.refine(d => d.oneTokenWalletPattern || d.emailFields, {
+		message: 'pendingRedemptionSource must specify at least one source',
+	})
+
+export type PendingRedemptionSource = z.infer<typeof pendingRedemptionSourceSchema>
+
+// 1token snapshot anchor — explicit per-token rule. If absent, the workflow
+// defaults to {source:'vlayer_email_date', offsetHours:1} when the token has
+// a fundManager, otherwise {source:'ops_created_at', offsetHours:-3}.
+const anchorRuleSchema = z.object({
+	source: z.enum(['vlayer_email_date', 'ops_created_at']),
+	offsetHours: z.number().int(),
+})
+
+export type AnchorRule = z.infer<typeof anchorRuleSchema>
+
+const tokenConfigSchema = z.object({
+	name: z.string(),
+	address: z.string().optional(),  // token contract address (used by external supply endpoint)
+	fundManager: fundManagerConfigSchema.optional(),
+	oneTokenApi: oneTokenApiSchema.optional(),
+	supplyToken: supplyTokenSchema.optional(),
+	pendingRedemptionSource: pendingRedemptionSourceSchema.optional(),
+	anchorRule: anchorRuleSchema.optional(),
+})
+
+export type TokenConfig = z.infer<typeof tokenConfigSchema>
+
+export const configSchema = z
+	.object({
+		name: z.string(),
+		newClaimLogTrigger: logTriggerConfigSchema,
+		httpTrigger: httpTriggerConfigSchema,
+		attesterProxy: registryConfigSchema,
+		ipfsHttpEndpoint: ipfsHttpEndpointSchema,
+		ipfsPinataEndpoint: ipfsPinataEndpointSchema.optional(),
+		attester: attesterConfigSchema,
+		overcollateralizationThreshold: z.number().min(0).max(1).default(0.995),
+		oneTokenDeviationThresholdPercent: z.number().min(0).max(100).default(5),
+		// Token registry — fetched at runtime from a public URL.
+		// To add a new token: open a PR updating the registry file, no workflow re-deploy needed.
+		tokenRegistry: tokenRegistrySchema.optional(),
+		// Inline token map — keyed by proofId (lowercase bytes32 hex).
+		// Used when tokenRegistry is not set, or as override on top of the fetched registry.
+		tokens: z.record(z.string(), tokenConfigSchema).default({}),
+	})
+	.refine((d) => d.name.trim().length > 0, { message: 'Name cannot be empty', path: ['name'] })
+	.refine((d) => d.tokenRegistry != null || Object.keys(d.tokens).length > 0, {
+		message: 'Either tokenRegistry must be set or at least one inline token must be registered',
+		path: ['tokens'],
+	})
+
+export type Config = z.infer<typeof configSchema>

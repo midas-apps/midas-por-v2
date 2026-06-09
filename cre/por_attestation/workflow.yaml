@@ -1,0 +1,36 @@
+# ==========================================================================
+# CRE WORKFLOW SETTINGS FILE — Midas PoR Attestation
+# ==========================================================================
+# One workflow instance handles ALL registered tokens.
+# To add a new token: update the config JSON (tokens map) and re-deploy:
+#   cre workflow deploy ./por_attestation --target por-attester-dev \
+#     --wasm ./por_attestation/binary.wasm.br.b64 -e ../.env.dev --yes
+# The --wasm flag skips recompilation. workflow_name stays stable,
+# only workflow_hash changes.
+
+# ==========================================================================
+por-attester-dev:
+  user-workflow:
+    workflow-name: "midas_por_attestation_dev"
+  workflow-artifacts:
+    workflow-path: "./main.ts"
+    config-path: "./config.por_attestation.dev.json"
+    secrets-path: "../secrets.yaml"
+
+# ==========================================================================
+por-attester-test:
+  user-workflow:
+    workflow-name: "midas_por_attestation_test"
+  workflow-artifacts:
+    workflow-path: "./main.ts"
+    config-path: "./config.por_attestation.test.json"
+    secrets-path: "../secrets.yaml"
+
+# ==========================================================================
+por-attester-prod:
+  user-workflow:
+    workflow-name: "midas_por_attestation_prod"
+  workflow-artifacts:
+    workflow-path: "./main.ts"
+    config-path: "./config.por_attestation.prod.json"
+    secrets-path: "../secrets.yaml"

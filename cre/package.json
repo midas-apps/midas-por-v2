@@ -1,0 +1,18 @@
+{
+  "name": "midas-por-workflows",
+  "private": true,
+  "dependencies": {
+    "@chainlink/cre-sdk": "1.0.9",
+    "@noble/hashes": "1.6.1",
+    "por-attestation-workflow": "./por_attestation",
+    "por-verification-workflow": "./por_verification",
+    "pako": "2.1.0",
+    "viem": "2.50.3",
+    "zod": "4.4.0"
+  },
+  "devDependencies": {
+    "@types/bun": "1.2.21",
+    "@types/pako": "2.0.3",
+    "typescript": "5.7.2"
+  }
+}

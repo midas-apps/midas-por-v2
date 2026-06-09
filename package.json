@@ -1,0 +1,18 @@
+{
+  "name": "midas-por",
+  "private": true,
+  "packageManager": "yarn@4.14.1",
+  "workspaces": [
+    "packages/*",
+    "cre/por_attestation",
+    "cre/por_verification"
+  ],
+  "resolutions": {
+    "ws": "8.20.1",
+    "zod": "4.4.0"
+  },
+  "scripts": {
+    "build": "yarn workspaces foreach -Apt run build",
+    "typecheck": "yarn workspaces foreach -Apt run typecheck"
+  }
+}

@@ -1,0 +1,17 @@
+.DS_Store
+.env
+node_modules/
+.cre_build_tmp.js
+*.prod.json
+*.dev.json
+*.test.json
+cre/.env.dev
+cre/.env.prod
+frontend/
+bun.lock
+cre/attestation_archive/
+cre/verification_archive/
+.yarn/install-state.gz
+cre/*/binary.wasm
+cre/*/binary.wasm.br.b64
+cre/*/.workflow-temp-*.ts

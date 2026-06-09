@@ -1,0 +1,24 @@
+{
+  "name": "nav-por-attestation-workflow",
+  "version": "1.0.0",
+  "main": "dist/main.js",
+  "private": true,
+  "license": "BUSL-1.1",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "setup": "yarn dlx cre-setup"
+  },
+  "dependencies": {
+    "@chainlink/cre-sdk": "1.0.9",
+    "@noble/hashes": "1.6.1",
+    "@save/core": "workspace:*",
+    "pako": "2.1.0",
+    "viem": "2.50.3",
+    "zod": "4.4.0"
+  },
+  "devDependencies": {
+    "@types/pako": "2.0.3",
+    "typescript": "5.7.2"
+  }
+}

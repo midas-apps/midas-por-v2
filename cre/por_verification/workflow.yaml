@@ -1,0 +1,36 @@
+# ==========================================================================
+# CRE WORKFLOW SETTINGS FILE — Midas PoR Verification
+# ==========================================================================
+# One workflow instance handles ALL registered tokens.
+# To add a new token: update the config JSON (tokens map) and re-deploy:
+#   cre workflow deploy ./por_verification --target por-verifier-dev \
+#     --wasm ./por_verification/binary.wasm.br.b64 -e ../.env.dev --yes
+# The --wasm flag skips recompilation. workflow_name stays stable,
+# only workflow_hash changes.
+
+# ==========================================================================
+por-verifier-dev:
+  user-workflow:
+    workflow-name: "midas_por_verification_dev"
+  workflow-artifacts:
+    workflow-path: "./main.ts"
+    config-path: "./config.por_verification.dev.json"
+    secrets-path: "../secrets.yaml"
+
+# ==========================================================================
+por-verifier-test:
+  user-workflow:
+    workflow-name: "midas_por_verification_test"
+  workflow-artifacts:
+    workflow-path: "./main.ts"
+    config-path: "./config.por_verification.test.json"
+    secrets-path: "../secrets.yaml"
+
+# ==========================================================================
+por-verifier-prod:
+  user-workflow:
+    workflow-name: "midas_por_verification_prod"
+  workflow-artifacts:
+    workflow-path: "./main.ts"
+    config-path: "./config.por_verification.prod.json"
+    secrets-path: "../secrets.yaml"
