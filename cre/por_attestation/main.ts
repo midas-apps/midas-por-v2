@@ -498,8 +498,8 @@ const runWorkflow = async (
 
 		let pendingRedemptionUSD = 0
 		const prs = tokenConfig.pendingRedemptionSource
-		if (prs?.oneTokenWalletPattern && typeof oneTokenRawReport?.pendingRedemptionMillionsUSD === 'number') {
-			const fromOneToken = oneTokenRawReport.pendingRedemptionMillionsUSD * 1_000_000
+		if (prs?.oneTokenWalletPattern && typeof oneTokenRawReport?.pendingRedemption === 'number') {
+			const fromOneToken = oneTokenRawReport.pendingRedemption
 			pendingRedemptionUSD += fromOneToken
 			runtime.log(`Pending redemption (1token wallet "${prs.oneTokenWalletPattern}"): ${fromOneToken.toFixed(0)} USD`)
 		}
@@ -535,8 +535,11 @@ const runWorkflow = async (
 
 			if (externalAUMGross !== null && opsNavUsed > 0) {
 				const externalAUMNet = externalAUMGross - pendingRedemptionUSD
-				const dev = Math.abs((externalAUMNet - opsNavUsed) / opsNavUsed) * 100
-				runtime.log(`External NAV (${externalLabel}) vs ops deviation: external_net=${externalAUMNet.toFixed(0)} (gross=${externalAUMGross.toFixed(0)} - pending=${pendingRedemptionUSD.toFixed(0)}), ops=${opsNavUsed.toFixed(0)}, deviation=${dev.toFixed(2)}% (threshold: ${deviationThreshold}%)${dev > deviationThreshold ? ' ⚠ EXCEEDS THRESHOLD' : ''}`)
+				const opsNetForDev = tokenConfig.opsNavIsNetOfPending
+					? opsNavUsed
+					: opsNavUsed - pendingRedemptionUSD
+				const dev = Math.abs((externalAUMNet - opsNetForDev) / opsNetForDev) * 100
+				runtime.log(`External NAV (${externalLabel}) vs ops deviation: external_net=${externalAUMNet.toFixed(0)} (gross=${externalAUMGross.toFixed(0)} - pending=${pendingRedemptionUSD.toFixed(0)}), ops_net=${opsNetForDev.toFixed(0)} (raw=${opsNavUsed.toFixed(0)}${tokenConfig.opsNavIsNetOfPending ? ' already net' : ' - pending'}), deviation=${dev.toFixed(2)}% (threshold: ${deviationThreshold}%)${dev > deviationThreshold ? ' ⚠ EXCEEDS THRESHOLD' : ''}`)
 			}
 
 			// Cross-check sanity: if navIsTotal=true, log deviation vlayer vs 1token (both estimate total)
@@ -560,7 +563,10 @@ const runWorkflow = async (
 		if (requiresOneTokenForPending && !oneTokenAvailable) {
 			runtime.log('Method-1 unavailable: 1token report failed but pendingRedemptionSource.oneTokenWalletPattern is configured — falling back to method-2')
 		} else if (tokenConfig.address && oraclePriceUSD > 0) {
-			const eventTsSec = Math.floor(new Date(opsClaimData.createdAt).getTime() / 1000)
+			// Use the 1token anchor timestamp so AUM (1token) and supply (Midas API)
+			// are sampled at the same moment — apples-to-apples ratio.
+			const anchorForSupply = oneTokenAnchorISO ?? opsClaimData.createdAt
+			const eventTsSec = Math.floor(new Date(anchorForSupply).getTime() / 1000)
 			const midasSupply = fetchMidasTotalSupply(runtime, tokenConfig.address, eventTsSec)
 
 			if (midasSupply) {

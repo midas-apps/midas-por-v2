@@ -329,23 +329,25 @@ export interface OneTokenReportData {
 	liabilities: Record<string, number>
 	equity: Record<string, number>
 	navBase?: number
-	/** Pending redemption in millions USD, extracted from nav_by_wallet entries matching the pattern (case-insensitive substring on the wallet label). Only present if a pattern was provided to fetch. */
-	pendingRedemptionMillionsUSD?: number
+	/** Pending redemption extracted from nav_by_wallet entries matching the pattern. Unit matches the AUM unit: raw base currency (e.g. BTC) when useNavBase=true, USD otherwise (already converted from millions). Only present if a pattern was provided to fetch. */
+	pendingRedemption?: number
 }
 
 const ONE_TOKEN_API_URL = 'https://api-prod.midas.app/api/transparency/by-timestamp'
 
 /**
- * Sum nav_by_wallet.pv_usd entries whose key contains the pattern (case-insensitive).
+ * Sum nav_by_wallet entries whose key contains the pattern (case-insensitive).
  * The 1token wallet keys look like "('0xabc...', 'mHyperBTC_Redemption_Vault_Ethereum')".
+ * When useNavBase is true, sums from `pv_base` (in the token's native base currency,
+ * e.g. BTC for mHyperBTC). Otherwise sums from `pv_usd` (in millions USD).
  * Returns 0 if no match or no nav_by_wallet.
  */
-function sumNavByWalletPattern(reports: any, pattern: string): number {
-	const navByWalletPvUsd = reports?.nav_by_wallet?.pv_usd
-	if (!navByWalletPvUsd || typeof navByWalletPvUsd !== 'object') return 0
+function sumNavByWalletPattern(reports: any, pattern: string, useNavBase: boolean): number {
+	const navByWallet = useNavBase ? reports?.nav_by_wallet?.pv_base : reports?.nav_by_wallet?.pv_usd
+	if (!navByWallet || typeof navByWallet !== 'object') return 0
 	const needle = pattern.toLowerCase()
 	let total = 0
-	for (const [key, value] of Object.entries(navByWalletPvUsd)) {
+	for (const [key, value] of Object.entries(navByWallet)) {
 		if (typeof value !== 'number') continue
 		if (key.toLowerCase().includes(needle)) total += value
 	}
@@ -357,6 +359,7 @@ function fetchOneTokenReportInternal(
 	tokenName: string,
 	timestamp: string,
 	pendingPattern?: string,
+	useNavBase: boolean = false,
 ): OneTokenReportData {
 	const url = `${ONE_TOKEN_API_URL}?token=${tokenName}&timestamp=${timestamp}`
 
@@ -392,14 +395,18 @@ function fetchOneTokenReportInternal(
 		Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, typeof v === 'number' ? v : 0]))
 
 	const navBaseCurrencyTotal = reports?.nav_by_chain?.pv_base?.total
-	const pending = pendingPattern ? sumNavByWalletPattern(reports, pendingPattern) : undefined
+	const pendingRaw = pendingPattern ? sumNavByWalletPattern(reports, pendingPattern, useNavBase) : undefined
+	// pv_base is in raw base currency (e.g. BTC). pv_usd is in millions USD — convert to USD.
+	const pending = typeof pendingRaw === 'number'
+		? (useNavBase ? pendingRaw : pendingRaw * 1_000_000)
+		: undefined
 
 	return {
 		assets: sanitize(report.assets ?? {}),
 		liabilities: sanitize(report.liabilities ?? {}),
 		equity: sanitize(report.equity ?? {}),
 		...(typeof navBaseCurrencyTotal === 'number' ? { navBase: navBaseCurrencyTotal } : {}),
-		...(typeof pending === 'number' ? { pendingRedemptionMillionsUSD: pending } : {}),
+		...(typeof pending === 'number' ? { pendingRedemption: pending } : {}),
 	}
 }
 
@@ -462,7 +469,7 @@ export function fetchSupplyDetails(
 export function fetchOneTokenReport(
 	runtime: Runtime<Config>,
 	timestamp: string,
-	oneTokenApi: { tokenName: string },
+	oneTokenApi: { tokenName: string; useNavBase?: boolean },
 	pendingPattern?: string,
 ): OneTokenReportData | null {
 	return runtime.runInNodeMode(
@@ -471,6 +478,7 @@ export function fetchOneTokenReport(
 			oneTokenApi.tokenName,
 			timestamp,
 			pendingPattern,
+			oneTokenApi.useNavBase ?? false,
 		),
 		consensusIdenticalAggregation<OneTokenReportData>()
 	)().result()

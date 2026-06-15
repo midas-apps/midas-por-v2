@@ -115,6 +115,12 @@ const tokenConfigSchema = z.object({
 	supplyToken: supplyTokenSchema.optional(),
 	pendingRedemptionSource: pendingRedemptionSourceSchema.optional(),
 	anchorRule: anchorRuleSchema.optional(),
+	// true if ops's `navReportedByOps` already excludes pending redemption (e.g. mFONE
+	// reports Total assets = Strategy − Redemption Process). false/absent if ops reports
+	// gross (e.g. mHyperBTC reports Strategy + Settlement). Controls whether we subtract
+	// the pending value from ops's NAV when computing the symmetric deviation against
+	// external (1token) net NAV.
+	opsNavIsNetOfPending: z.boolean().optional(),
 })
 
 export type TokenConfig = z.infer<typeof tokenConfigSchema>
