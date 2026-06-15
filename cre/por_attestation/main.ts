@@ -567,7 +567,7 @@ const runWorkflow = async (
 			// are sampled at the same moment — apples-to-apples ratio.
 			const anchorForSupply = oneTokenAnchorISO ?? opsClaimData.createdAt
 			const eventTsSec = Math.floor(new Date(anchorForSupply).getTime() / 1000)
-			const midasSupply = fetchMidasTotalSupply(runtime, tokenConfig.address, eventTsSec)
+			const midasSupply = fetchMidasTotalSupply(runtime, tokenConfig.address, eventTsSec, tokenConfig.chainSelectorName)
 
 			if (midasSupply) {
 				runtime.log(`Method-1 external supply: ${midasSupply.supply.toFixed(2)} tokens (${Object.keys(midasSupply.supplyByChain).length} chains)`)

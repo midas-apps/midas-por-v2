@@ -499,8 +499,9 @@ function fetchMidasTotalSupplyInternal(
 	nodeRuntime: NodeRuntime<Config>,
 	tokenAddress: string,
 	timestamp: number,
+	chainSelectorName: string = 'ethereum-mainnet',
 ): MidasTotalSupplyData {
-	const url = `${MIDAS_SUPPLY_API_URL}/${tokenAddress}?timestamp=${timestamp}`
+	const url = `${MIDAS_SUPPLY_API_URL}/${tokenAddress}?timestamp=${timestamp}&chain=${chainSelectorName}`
 
 	const httpClient = new HTTPClient()
 	const response = httpClient.sendRequest(nodeRuntime, {
@@ -540,6 +541,7 @@ export function fetchMidasTotalSupply(
 	runtime: Runtime<Config>,
 	tokenAddress: string,
 	timestamp: number,
+	chainSelectorName: string = 'ethereum-mainnet',
 ): MidasTotalSupplyData | null {
 	try {
 		return runtime.runInNodeMode(
@@ -547,6 +549,7 @@ export function fetchMidasTotalSupply(
 				nodeRuntime,
 				tokenAddress,
 				timestamp,
+				chainSelectorName,
 			),
 			consensusIdenticalAggregation<MidasTotalSupplyData>()
 		)().result()
