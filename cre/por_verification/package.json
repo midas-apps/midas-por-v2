@@ -10,15 +10,15 @@
     "setup": "yarn dlx cre-setup"
   },
   "dependencies": {
-    "@chainlink/cre-sdk": "1.0.9",
-    "@noble/hashes": "1.6.1",
+    "@chainlink/cre-sdk": "1.10.0",
+    "@noble/hashes": "2.2.0",
     "@save/core": "workspace:*",
     "pako": "2.1.0",
-    "viem": "2.50.3",
-    "zod": "3.25.76"
+    "viem": "2.52.2",
+    "zod": "4.4.3"
   },
   "devDependencies": {
-    "@types/pako": "2.0.3",
-    "typescript": "5.7.2"
+    "@types/pako": "2.0.4",
+    "typescript": "6.0.3"
   }
 }
