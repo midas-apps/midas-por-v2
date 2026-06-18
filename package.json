@@ -9,7 +9,7 @@
   ],
   "resolutions": {
     "ws": "8.20.1",
-    "zod": "4.4.0"
+    "zod": "3.25.76"
   },
   "scripts": {
     "build": "yarn workspaces foreach -Apt run build",

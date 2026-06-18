@@ -21,7 +21,7 @@ export interface TokenRegistryConfig {
 	fallbackUrl?: string
 }
 
-const DEFAULT_TIMEOUT = '15s'
+const DEFAULT_TIMEOUT = '10s'
 const DEFAULT_CACHE_MAX_AGE = '30s'
 
 /**

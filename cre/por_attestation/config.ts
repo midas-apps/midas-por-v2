@@ -110,11 +110,22 @@ export type AnchorRule = z.infer<typeof anchorRuleSchema>
 const tokenConfigSchema = z.object({
 	name: z.string(),
 	address: z.string().optional(),  // token contract address (used by external supply endpoint)
+	// Primary chain the token lives on (chain selector name from cre-sdk). Defaults to
+	// ethereum-mainnet when absent. Override for tokens on other chains (e.g. Base:
+	// "ethereum-mainnet-base-1"). Passed to the Midas supply endpoint and any on-chain
+	// read related to this token contract.
+	chainSelectorName: z.string().default('ethereum-mainnet'),
 	fundManager: fundManagerConfigSchema.optional(),
 	oneTokenApi: oneTokenApiSchema.optional(),
 	supplyToken: supplyTokenSchema.optional(),
 	pendingRedemptionSource: pendingRedemptionSourceSchema.optional(),
 	anchorRule: anchorRuleSchema.optional(),
+	// true if ops's `navReportedByOps` already excludes pending redemption (e.g. mFONE
+	// reports Total assets = Strategy − Redemption Process). false/absent if ops reports
+	// gross (e.g. mHyperBTC reports Strategy + Settlement). Controls whether we subtract
+	// the pending value from ops's NAV when computing the symmetric deviation against
+	// external (1token) net NAV.
+	opsNavIsNetOfPending: z.boolean().optional(),
 })
 
 export type TokenConfig = z.infer<typeof tokenConfigSchema>

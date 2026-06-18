@@ -6,7 +6,7 @@
 por-attester-dev:
   rpcs:
     - chain-name: ethereum-testnet-sepolia
-      url: https://ethereum-sepolia-rpc.publicnode.com
+      url: https://sepolia.drpc.org
     - chain-name: ethereum-mainnet
       url: https://ethereum-rpc.publicnode.com
 
@@ -14,7 +14,7 @@ por-attester-dev:
 por-attester-test:
   rpcs:
     - chain-name: ethereum-testnet-sepolia
-      url: https://ethereum-sepolia-rpc.publicnode.com
+      url: https://sepolia.drpc.org
     - chain-name: ethereum-mainnet
       url: https://ethereum-rpc.publicnode.com
 
@@ -28,7 +28,7 @@ por-attester-prod:
 por-verifier-dev:
   rpcs:
     - chain-name: ethereum-testnet-sepolia
-      url: https://ethereum-sepolia-rpc.publicnode.com
+      url: https://sepolia.drpc.org
     - chain-name: ethereum-mainnet
       url: https://ethereum-rpc.publicnode.com
 
@@ -36,7 +36,7 @@ por-verifier-dev:
 por-verifier-test:
   rpcs:
     - chain-name: ethereum-testnet-sepolia
-      url: https://ethereum-sepolia-rpc.publicnode.com
+      url: https://sepolia.drpc.org
     - chain-name: ethereum-mainnet
       url: https://ethereum-rpc.publicnode.com
 

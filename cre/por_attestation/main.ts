@@ -496,22 +496,25 @@ const runWorkflow = async (
 		// so denominator and numerator stay apples-to-apples with ops's circulating-supply
 		// accounting (ops's NAV already excludes assets allocated to pending payouts).
 
-		let pendingRedemptionUSD = 0
+		// Unit matches the AUM unit: USD for most tokens, base currency (e.g. BTC) when
+		// `oneTokenApi.useNavBase` is set. Subtractions against AUM stay apples-to-apples
+		// only when both sides come from the same source pipeline.
+		let pendingRedemption = 0
 		const prs = tokenConfig.pendingRedemptionSource
-		if (prs?.oneTokenWalletPattern && typeof oneTokenRawReport?.pendingRedemptionMillionsUSD === 'number') {
-			const fromOneToken = oneTokenRawReport.pendingRedemptionMillionsUSD * 1_000_000
-			pendingRedemptionUSD += fromOneToken
+		if (prs?.oneTokenWalletPattern && typeof oneTokenRawReport?.pendingRedemption === 'number') {
+			const fromOneToken = oneTokenRawReport.pendingRedemption
+			pendingRedemption += fromOneToken
 			runtime.log(`Pending redemption (1token wallet "${prs.oneTokenWalletPattern}"): ${fromOneToken.toFixed(0)} USD`)
 		}
 		if (prs?.emailFields && fundManagerEmailClaim) {
 			const extracted = extractNavFromEmail(fundManagerEmailClaim, prs.emailFields)
 			if (extracted !== null) {
-				pendingRedemptionUSD += extracted
+				pendingRedemption += extracted
 				runtime.log(`Pending redemption (email fields ${JSON.stringify(prs.emailFields)}): ${extracted.toFixed(0)} USD`)
 			}
 		}
-		if (pendingRedemptionUSD > 0) {
-			runtime.log(`Pending redemption total: ${pendingRedemptionUSD.toFixed(0)} USD`)
+		if (pendingRedemption > 0) {
+			runtime.log(`Pending redemption total: ${pendingRedemption.toFixed(0)} USD`)
 		}
 
 		// External NAV deviation vs ops — comparing apples-to-apples (both net of pending payouts)
@@ -534,9 +537,15 @@ const runWorkflow = async (
 			}
 
 			if (externalAUMGross !== null && opsNavUsed > 0) {
-				const externalAUMNet = externalAUMGross - pendingRedemptionUSD
-				const dev = Math.abs((externalAUMNet - opsNavUsed) / opsNavUsed) * 100
-				runtime.log(`External NAV (${externalLabel}) vs ops deviation: external_net=${externalAUMNet.toFixed(0)} (gross=${externalAUMGross.toFixed(0)} - pending=${pendingRedemptionUSD.toFixed(0)}), ops=${opsNavUsed.toFixed(0)}, deviation=${dev.toFixed(2)}% (threshold: ${deviationThreshold}%)${dev > deviationThreshold ? ' ⚠ EXCEEDS THRESHOLD' : ''}`)
+				const externalAUMNet = externalAUMGross - pendingRedemption
+				const opsNetForDev = tokenConfig.opsNavIsNetOfPending
+					? opsNavUsed
+					: opsNavUsed - pendingRedemption
+				if (opsNetForDev <= 0) {
+					throw new Error(`Invalid ops NAV for deviation: opsNetForDev=${opsNetForDev} (opsNavUsed=${opsNavUsed}, pending=${pendingRedemption}, opsNavIsNetOfPending=${!!tokenConfig.opsNavIsNetOfPending}) — pending exceeds NAV or ops payload is malformed`)
+				}
+				const dev = Math.abs((externalAUMNet - opsNetForDev) / opsNetForDev) * 100
+				runtime.log(`External NAV (${externalLabel}) vs ops deviation: external_net=${externalAUMNet.toFixed(0)} (gross=${externalAUMGross.toFixed(0)} - pending=${pendingRedemption.toFixed(0)}), ops_net=${opsNetForDev.toFixed(0)} (raw=${opsNavUsed.toFixed(0)}${tokenConfig.opsNavIsNetOfPending ? ' already net' : ' - pending'}), deviation=${dev.toFixed(2)}% (threshold: ${deviationThreshold}%)${dev > deviationThreshold ? ' ⚠ EXCEEDS THRESHOLD' : ''}`)
 			}
 
 			// Cross-check sanity: if navIsTotal=true, log deviation vlayer vs 1token (both estimate total)
@@ -560,13 +569,16 @@ const runWorkflow = async (
 		if (requiresOneTokenForPending && !oneTokenAvailable) {
 			runtime.log('Method-1 unavailable: 1token report failed but pendingRedemptionSource.oneTokenWalletPattern is configured — falling back to method-2')
 		} else if (tokenConfig.address && oraclePriceUSD > 0) {
-			const eventTsSec = Math.floor(new Date(opsClaimData.createdAt).getTime() / 1000)
-			const midasSupply = fetchMidasTotalSupply(runtime, tokenConfig.address, eventTsSec)
+			// Use the 1token anchor timestamp so AUM (1token) and supply (Midas API)
+			// are sampled at the same moment — apples-to-apples ratio.
+			const anchorForSupply = oneTokenAnchorISO ?? opsClaimData.createdAt
+			const eventTsSec = Math.floor(new Date(anchorForSupply).getTime() / 1000)
+			const midasSupply = fetchMidasTotalSupply(runtime, tokenConfig.address, eventTsSec, tokenConfig.chainSelectorName)
 
 			if (midasSupply) {
 				runtime.log(`Method-1 external supply: ${midasSupply.supply.toFixed(2)} tokens (${Object.keys(midasSupply.supplyByChain).length} chains)`)
 
-				const pendingTokens = pendingRedemptionUSD / oraclePriceUSD
+				const pendingTokens = pendingRedemption / oraclePriceUSD
 				const effectiveSupply = midasSupply.supply - pendingTokens
 				if (effectiveSupply > 0) {
 					method1SupplyTokens = effectiveSupply
@@ -602,7 +614,7 @@ const runWorkflow = async (
 			// So external AUMs (built from 1token + vlayer) must also exclude pending
 			// to stay apples-to-apples with the denominator.
 			// The "ops" candidate uses opsNavReportedByOps which is already net — no adj there.
-			const aumPendingAdj = pendingRedemptionUSD
+			const aumPendingAdj = pendingRedemption
 
 			if (oneTokenOnchainAUM !== null) {
 				if (fm && !fm.navIsTotal && emailNavUSD !== null) {
@@ -664,7 +676,7 @@ const runWorkflow = async (
 				threshold,
 				selectedCandidate.supplyTokens,
 				selectedCandidate.supplySource,
-				pendingRedemptionUSD,
+				pendingRedemption,
 				oneTokenOnchainAUM,
 				emailNavUSD,
 			)
