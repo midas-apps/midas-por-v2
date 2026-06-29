@@ -497,8 +497,10 @@ const runWorkflow = async (
 		// accounting (ops's NAV already excludes assets allocated to pending payouts).
 
 		// Unit matches the AUM unit: USD for most tokens, base currency (e.g. BTC) when
-		// `oneTokenApi.useNavBase` is set. Subtractions against AUM stay apples-to-apples
-		// only when both sides come from the same source pipeline.
+		// `oneTokenApi.useNavBase` is set. Email fields are always USD-denominated, so when
+		// `useNavBase` is true any email-sourced pending is converted to the base currency
+		// before accumulation to keep the unit consistent with the 1token-sourced portion.
+		const useNavBase = tokenConfig.oneTokenApi?.useNavBase === true
 		let pendingRedemption = 0
 		const prs = tokenConfig.pendingRedemptionSource
 		if (prs?.oneTokenWalletPattern && typeof oneTokenRawReport?.pendingRedemption === 'number') {
@@ -509,7 +511,8 @@ const runWorkflow = async (
 		if (prs?.emailFields && fundManagerEmailClaim) {
 			const extracted = extractNavFromEmail(fundManagerEmailClaim, prs.emailFields)
 			if (extracted !== null) {
-				pendingRedemption += extracted
+				const adjusted = useNavBase && oraclePriceUSD > 0 ? extracted / oraclePriceUSD : extracted
+				pendingRedemption += adjusted
 				runtime.log(`Pending redemption (email fields ${JSON.stringify(prs.emailFields)}): ${extracted.toFixed(0)} USD`)
 			}
 		}
@@ -568,7 +571,6 @@ const runWorkflow = async (
 		// so we derive USD-converted versions here. The deviation log above keeps the
 		// original unit so the ops-vs-external comparison stays apples-to-apples in
 		// whichever unit ops reports in.
-		const useNavBase = tokenConfig.oneTokenApi?.useNavBase === true
 		const oneTokenOnchainAUMUSD = oneTokenOnchainAUM !== null && useNavBase
 			? oneTokenOnchainAUM * oraclePriceUSD
 			: oneTokenOnchainAUM
