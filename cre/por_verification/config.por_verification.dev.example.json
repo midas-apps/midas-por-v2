@@ -40,7 +40,7 @@
     "publicKey": "<YOUR_VERIFIER_PUBLIC_KEY>"
   },
   "vlayerEndpoint": {
-    "url": "https://web-prover.vlayer.xyz/api/v1/verify",
+    "url": "https://web-prover.production.vlayer.xyz/api/v2.0/verify",
     "clientId": "<YOUR_VLAYER_CLIENT_ID>"
   },
   "tokens": {

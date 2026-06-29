@@ -86,7 +86,7 @@ export interface SignatureProofData extends SignatureProofCommon {
  * ZK-TLS Notary proof - cryptographic proof of web data using TLS session attestation
  * 
  * Vlayer implementation (currently the only supported provider):
- * - Verification endpoint: https://web-prover.vlayer.xyz/api/v1/verify
+ * - Verification endpoint: https://web-prover.production.vlayer.xyz/api/v2.0/verify
  * - Validation: POST the raw proof data to the endpoint and verify response matches stored data
  */
 export interface ZkTlsNotaryProofData {
@@ -110,7 +110,7 @@ export interface ZkTlsNotaryProofData {
   };
   /** 
    * Vlayer verification endpoint URL
-   * Defaults to: https://web-prover.vlayer.xyz/api/v1/verify
+   * Defaults to: https://web-prover.production.vlayer.xyz/api/v2.0/verify
    */
   verificationEndpoint: string;
   /** Server domain that was proven (e.g., mail.google.com) */
