@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Midas | Attestation Reader</title>
+<style>
+:root {
+  --bg: #07101f; --sf: #0c1828; --card: #0f1e33; --bd: #1a2e48;
+  --tx: #dce8f5; --mt: #52657d; --ac: #4b7cf3; --ah: #3a6ae0;
+  --gr: #10b981; --rd: #ef4444; --ye: #f59e0b;
+  --ok: #10b981; --err: #ef4444; --warm: #f59e0b;
+  --mono: 'Courier New', ui-monospace, monospace;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: var(--bg); color: var(--tx); font-family: system-ui, -apple-system, sans-serif; font-size: 14px; min-height: 100vh; }
+header { display: flex; align-items: center; gap: 12px; padding: 13px 24px; border-bottom: 1px solid var(--bd); background: var(--sf); }
+.logo { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 15px; }
+.sep { width: 1px; height: 18px; background: var(--bd); }
+.tool-title { color: var(--mt); font-size: 13px; }
+main { max-width: 900px; margin: 0 auto; padding: 24px; display: flex; flex-direction: column; gap: 16px; }
+.card { background: var(--card); border: 1px solid var(--bd); border-radius: 10px; padding: 16px; }
+.card-label { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--mt); margin-bottom: 10px; }
+.input-row { display: flex; gap: 8px; }
+.input-row input {
+  flex: 1; background: var(--sf); border: 1px solid var(--bd); border-radius: 6px;
+  color: var(--tx); font-family: var(--mono); font-size: 13px; padding: 9px 12px;
+  outline: none; transition: border-color .15s;
+}
+.input-row input:focus { border-color: var(--ac); }
+.input-row input::placeholder { color: var(--mt); }
+.btn { border: none; border-radius: 6px; padding: 9px 20px; font-size: 13px; font-weight: 600; cursor: pointer; transition: background .15s; white-space: nowrap; }
+.btn-primary { background: var(--ac); color: #fff; }
+.btn-primary:hover { background: var(--ah); }
+.btn-primary:disabled { opacity: 0.5; cursor: progress; }
+.hint { font-size: 12px; color: var(--mt); }
+.hint code { font-family: var(--mono); background: var(--sf); padding: 1px 5px; border-radius: 3px; border: 1px solid var(--bd); font-size: 11px; }
+.status { padding: 10px 14px; border-radius: 8px; font-size: 13px; }
+.status.error { background: rgba(239,68,68,.08); border: 1px solid rgba(239,68,68,.3); color: var(--err); }
+.status.info { background: var(--sf); border: 1px solid var(--bd); color: var(--mt); }
+.kv-grid { display: grid; grid-template-columns: 180px 1fr; gap: 5px 16px; font-size: 13px; }
+.kv-grid .k { color: var(--mt); }
+.kv-grid .v { font-family: var(--mono); word-break: break-all; }
+.kv-grid .v.warm { color: var(--warm); }
+.kv-grid .v.ok   { color: var(--ok); }
+.kv-grid .v.err  { color: var(--err); }
+.claim {
+  background: var(--sf); border: 1px solid var(--bd); border-radius: 8px;
+  padding: 14px 16px; margin-top: 10px;
+}
+.claim-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.claim-id { font-family: var(--mono); font-size: 13px; font-weight: 600; color: var(--ac); }
+.claim-meta {
+  font-size: 11px; color: var(--mt); background: var(--card);
+  padding: 2px 8px; border-radius: 4px; border: 1px solid var(--bd);
+}
+.claim-desc { font-size: 12px; color: var(--mt); margin-bottom: 10px; }
+details { margin-top: 8px; }
+details summary { cursor: pointer; color: var(--mt); font-size: 12px; user-select: none; }
+details pre {
+  background: var(--bg); border: 1px solid var(--bd); border-radius: 6px;
+  padding: 10px 12px; font-size: 11px; overflow-x: auto; margin: 6px 0 0;
+  font-family: var(--mono); color: var(--tx);
+}
+.badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+.badge.ok  { background: rgba(16,185,129,.12); color: var(--ok); }
+.badge.err { background: rgba(239,68,68,.12); color: var(--err); }
+.spinner {
+  display: inline-block; width: 12px; height: 12px;
+  border: 2px solid var(--bd); border-top-color: var(--ac);
+  border-radius: 50%; animation: spin .8s linear infinite; vertical-align: middle;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+a { color: var(--ac); }
+a:hover { opacity: .8; }
+.muted { font-size: 12px; color: var(--mt); padding: 4px 0; }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">
+    <svg width="28" height="20" viewBox="68 55 126 90" fill="none" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="lg" x1="97.7" y1="112.5" x2="169.9" y2="58.3" gradientUnits="userSpaceOnUse"><stop offset="0.16" stop-color="#3864FF"/><stop offset="0.56" stop-color="#6083FF"/><stop offset="1" stop-color="#3864FF"/></linearGradient></defs><path fill-rule="evenodd" clip-rule="evenodd" d="M111.556 116.444V136.968C111.556 138.034 110.404 138.703 109.478 138.174L74.0664 117.939C73.2009 117.444 72.6668 116.524 72.6668 115.527V72.3099C72.6668 71.2435 73.8188 70.5749 74.7448 71.104L92.1112 81.0277V104.639L111.556 116.444Z" fill="#3864FF" fill-opacity="0.4"/><path fill-rule="evenodd" clip-rule="evenodd" d="M150.445 116.444V136.968C150.445 138.034 151.597 138.703 152.523 138.174L187.934 117.939C188.799 117.444 189.333 116.524 189.333 115.527V72.3099C189.333 71.2435 188.181 70.5749 187.255 71.104L169.889 81.0277V104.639L150.445 116.444Z" fill="#3864FF" fill-opacity="0.4"/><path d="M92.1112 61.1987C92.1112 60.1323 93.2633 59.4637 94.1892 59.9928L130.311 80.6339C130.738 80.8779 131.262 80.8779 131.689 80.6339L167.811 59.9928C168.737 59.4637 169.889 60.1323 169.889 61.1987V104.639L131.721 127.812C131.278 128.081 130.722 128.081 130.279 127.812L92.1112 104.639V61.1987Z" fill="url(#lg)"/></svg>
+    Midas
+  </div>
+  <div class="sep"></div>
+  <div class="tool-title">Attestation Reader</div>
+</header>
+
+<main>
+  <div class="card">
+    <div class="card-label">Attestation Hash or TX Hash</div>
+    <div class="input-row">
+      <input id="input" type="text" placeholder="0x…  (32-byte attestationHash or setAttestation tx hash)" autocomplete="off" spellcheck="false">
+      <button class="btn btn-primary" id="go">Fetch</button>
+    </div>
+    <div class="hint" style="margin-top:8px">
+      Paste an on-chain <code>attestationHash</code> (bytes32) or a mainnet tx hash that called <code>setAttestation</code> — we'll auto-extract from logs.
+    </div>
+  </div>
+
+  <div id="status"></div>
+  <div id="output"></div>
+</main>
+
+<script>
+const GATEWAYS = [
+	'https://gateway.pinata.cloud/ipfs/',
+	'https://cloudflare-ipfs.com/ipfs/',
+	'https://ipfs.io/ipfs/',
+	'https://dweb.link/ipfs/',
+]
+const REGISTRY_URLS = [
+	'https://cdn.jsdelivr.net/gh/midas-apps/midas-por-v2@main/tokens.json',
+	'https://raw.githubusercontent.com/midas-apps/midas-por-v2/main/tokens.json',
+]
+const REGISTRY_ADDRESS = '0x2D6e9F608807436DE5D9603B00Abe3FEd1Bc809d'
+const ATTESTATION_SET_TOPIC = '0x77e3acc8e612b6097c89d0ce40e34c9eb7d5d7be6ec77f1cea9ed29ec8f17c4f' // placeholder; computed below
+const ETH_RPCS = [
+	'https://ethereum-rpc.publicnode.com',
+	'https://eth.llamarpc.com',
+	'https://rpc.ankr.com/eth',
+]
+
+const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+function base58Encode(bytes) {
+	let zeros = 0
+	while (zeros < bytes.length && bytes[zeros] === 0) zeros++
+	const size = Math.ceil(((bytes.length - zeros) * 138) / 100) + 1
+	const b58 = new Uint8Array(size)
+	let length = 0
+	for (let i = zeros; i < bytes.length; i++) {
+		let carry = bytes[i], j = 0
+		for (let k = size - 1; (carry !== 0 || j < length) && k >= 0; k--, j++) {
+			carry += 256 * b58[k]
+			b58[k] = carry % 58
+			carry = Math.floor(carry / 58)
+		}
+		length = j
+	}
+	let it = size - length
+	while (it < size && b58[it] === 0) it++
+	let out = '1'.repeat(zeros)
+	for (; it < size; it++) out += BASE58[b58[it]]
+	return out
+}
+function hashToCid(hex) {
+	const clean = hex.replace(/^0x/, '').toLowerCase()
+	if (!/^[0-9a-f]{64}$/.test(clean)) throw new Error('Expected 0x + 64 hex chars')
+	const mh = '1220' + clean
+	const bytes = new Uint8Array(34)
+	for (let i = 0; i < 34; i++) bytes[i] = parseInt(mh.slice(i * 2, i * 2 + 2), 16)
+	return base58Encode(bytes)
+}
+
+async function fetchFirst(urls, decode) {
+	const errs = []
+	for (const u of urls) {
+		try {
+			const r = await fetch(u)
+			if (!r.ok) { errs.push(`${u} → ${r.status}`); continue }
+			return { url: u, data: await decode(r) }
+		} catch (e) { errs.push(`${u} → ${e.message}`) }
+	}
+	throw new Error('All sources failed: ' + errs.join(' | '))
+}
+
+async function fetchAttestation(cid) {
+	const urls = GATEWAYS.map((g) => g + cid)
+	const { url, data } = await fetchFirst(urls, (r) => r.arrayBuffer())
+	const buf = new Uint8Array(data)
+	let jsonText
+	if (buf[0] === 0x1f && buf[1] === 0x8b) {
+		const stream = new Response(new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip')))
+		jsonText = await stream.text()
+	} else {
+		jsonText = new TextDecoder().decode(buf)
+	}
+	return { gateway: url, attestation: JSON.parse(jsonText) }
+}
+
+async function fetchRegistry() {
+	try {
+		const { data } = await fetchFirst(REGISTRY_URLS, (r) => r.json())
+		return data
+	} catch { return null }
+}
+
+async function rpcCall(method, params) {
+	const errs = []
+	for (const url of ETH_RPCS) {
+		try {
+			const r = await fetch(url, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+			})
+			const j = await r.json()
+			if (j.error) { errs.push(`${url} → ${j.error.message}`); continue }
+			return j.result
+		} catch (e) { errs.push(`${url} → ${e.message}`) }
+	}
+	throw new Error('RPC failed: ' + errs.join(' | '))
+}
+
+async function attestationHashFromTx(txHash) {
+	const receipt = await rpcCall('eth_getTransactionReceipt', [txHash])
+	if (!receipt) throw new Error('Transaction not found on mainnet')
+	const logs = receipt.logs.filter((l) =>
+		l.address.toLowerCase() === REGISTRY_ADDRESS.toLowerCase()
+	)
+	if (logs.length === 0) throw new Error('No SAVE registry log in this tx')
+	// AttestationSet(proofId, attestor, attestationHash, timestamp) — attestationHash is non-indexed,
+	// first 32 bytes of data
+	for (const log of logs) {
+		if (!log.data || log.data.length < 66) continue
+		const attestationHash = '0x' + log.data.slice(2, 66)
+		const proofId = log.topics[1]
+		return { attestationHash, proofId, txHash }
+	}
+	throw new Error('No AttestationSet event found')
+}
+
+function tokenNameFor(registry, proofId) {
+	if (!registry?.tokens || !proofId) return null
+	const k = Object.keys(registry.tokens).find((x) => x.toLowerCase() === proofId.toLowerCase())
+	return k ? registry.tokens[k].name : null
+}
+
+function el(tag, attrs = {}, ...children) {
+	const e = document.createElement(tag)
+	for (const [k, v] of Object.entries(attrs)) {
+		if (k === 'class') e.className = v
+		else if (k === 'html') e.innerHTML = v
+		else e.setAttribute(k, v)
+	}
+	for (const c of children.flat()) {
+		if (c == null) continue
+		if (c instanceof Node) e.appendChild(c)
+		else e.appendChild(document.createTextNode(String(c)))
+	}
+	return e
+}
+
+function kv(label, value, cls = '') {
+  return el('div', { class: 'kv-grid' },
+    el('span', { class: 'k' }, label),
+    el('span', { class: `v ${cls}` }, value ?? '-')
+  )
+}
+
+function renderClaimData(c) {
+	const rows = []
+	const add = (label, val, cls = '') => rows.push(kv(label, val, cls))
+
+	// Source-backed claims have no `data`, just a pointer + resolvedValue
+	if (c.claimType === 'source-backed' || c.data == null) {
+		if (c.pointer) add('pointer', c.pointer, 'warm')
+		if (c.dataType) add('dataType', c.dataType)
+		if (c.resolvedValue !== undefined) {
+			const v = typeof c.resolvedValue === 'object' ? JSON.stringify(c.resolvedValue) : String(c.resolvedValue)
+			add('resolvedValue', v, 'ok')
+		}
+		return el('div', {},
+			...rows,
+			el('details', {},
+				el('summary', {}, 'Raw claim'),
+				el('pre', {}, JSON.stringify(c, null, 2)),
+			)
+		)
+	}
+
+	const d = c.data || {}
+
+	switch (c.id) {
+		case 'onchain_supply':
+			add('chain', d.chainSelectorName)
+			add('token', d.tokenAddress)
+			add('totalSupply', `${d.supply}  (raw=${d.supplyRaw}, dec=${d.decimals})`)
+			add('readAt', d.readAt)
+			break
+		case 'oracle_price':
+			add('chain', d.chainSelectorName)
+			add('oracle', d.oracleAddress)
+			add('priceRaw', `${d.priceRaw} (dec=${d.decimals})`)
+			add('updatedAt', d.oracleLastUpdatedAtISO)
+			break
+		case 'overcollateralization': {
+			add('type', d.overcollateralizationType)
+			add('aumSource', d.aumSource)
+			add('supplySource', d.supplySource)
+			add('AUM', d.oneTokenAUM ?? '-')
+			add('supplyTokens', d.supplyTokens ?? d.totalSupplyTokens)
+			add('navPerToken', d.navPerToken)
+			add('oraclePrice', d.oraclePriceFormatted)
+			add('threshold', d.threshold)
+			const cls = d.passed ? 'ok' : 'err'
+			add('ratio', `${d.ratio}   ${d.passed ? 'PASSED' : 'FAILED'}`, cls)
+			if (d.pendingRedemptionUSD) add('pending (USD)', d.pendingRedemptionUSD)
+			if (d.fundManagerNavUSD) add('FM NAV (USD)', d.fundManagerNavUSD)
+			break
+		}
+		case 'ops_claim':
+			add('token', d.token)
+			add('NAV (USD)', d.navReportedByOps)
+			add('crossChainSupply', d.totalSupplyCrossChainReportedByOps)
+			if (d.createdAt) add('createdAt', d.createdAt)
+			if (d.oracleAddress) add('oracleAddress', d.oracleAddress)
+			break
+		case 'onetoken_report': {
+			const meta = d._metadata ?? {}
+			add('source', meta.source ?? '1token')
+			add('snapshot', `${meta.anchorISO ?? '-'} (rule=${meta.anchorRule ?? '-'})`, 'warm')
+			add('equity.total', d.equity?.total)
+			const walletsObj = d.nav_by_wallet?.pv_usd ?? d.nav_by_wallet?.pv_base ?? d.nav_by_wallet ?? {}
+			const walletKeys = Object.keys(walletsObj).filter((k) => typeof walletsObj[k] === 'number')
+			add('wallet count', walletKeys.length)
+			break
+		}
+		case 'email_nav':
+			add('navUSD', d.navUSD)
+			add('navIsTotal', String(d.navIsTotal))
+			add('fields summed', JSON.stringify(d.navFields))
+			break
+		default:
+			if (typeof d === 'object') {
+				for (const [k, v] of Object.entries(d)) {
+					const val = typeof v === 'object' ? JSON.stringify(v).slice(0, 80) + '…' : String(v)
+					add(k, val)
+				}
+			} else {
+				add('value', String(d))
+			}
+	}
+
+	return el('div', {},
+		...rows,
+		el('details', {},
+			el('summary', {}, 'Raw data'),
+			el('pre', {}, JSON.stringify(c.data, null, 2)),
+		)
+	)
+}
+
+function shortHex(s, prefix = 18, suffix = 6) {
+	if (typeof s !== 'string') return s == null ? '-' : JSON.stringify(s)
+	return s.length <= prefix + suffix + 1 ? s : `${s.slice(0, prefix)}…${s.slice(-suffix)}`
+}
+
+function renderAttestation(attestation, tokenName, cid, gateway, txInfo) {
+	const out = document.getElementById('output')
+	out.innerHTML = ''
+
+	const m = attestation.metadata ?? {}
+	const sig = attestation.signature ?? {}
+	const sigHex = typeof sig === 'string' ? sig : sig.signature
+
+  const meta = el('div', { class: 'card' },
+    el('div', { class: 'card-label' }, 'Attestation'),
+		kv('Token', tokenName ?? '(unknown — proofId not in current registry)', tokenName ? 'ok' : 'err'),
+		kv('proofId', m.proofId ?? '-'),
+		kv('attestationId', m.attestationId ?? '-'),
+		kv('schema / version', `${m.schema ?? '-'} / ${m.version ?? '-'}`),
+		kv('Issuer', `${m.issuer?.name ?? '-'} · ${shortHex(m.issuer?.identity)}`),
+		kv('Public key source', sig.publicKeySource ?? '-'),
+		kv('Created at', m.createdAt ?? '-'),
+		kv('Expires at', m.expiresAt ?? '-'),
+		kv('Sig algo', sig.algorithm ?? '-'),
+		kv('Signature', shortHex(sigHex, 24, 8)),
+		kv('IPFS CID', cid),
+		kv('Fetched via', gateway),
+		txInfo ? kv('Source tx', txInfo.txHash) : null,
+	)
+	out.appendChild(meta)
+
+	const claims = attestation.claims ?? []
+  const claimsCard = el('div', { class: 'card' },
+    el('div', { class: 'card-label' }, `Claims (${claims.length})`),
+  )
+	for (const c of claims) {
+		const typeLabel = c.claimType ?? c.format ?? '?'
+		const extra = c.format && c.format !== c.claimType ? ` · ${c.format}` : ''
+		const claimNode = el('div', { class: 'claim' },
+			el('div', { class: 'claim-head' },
+				el('span', { class: 'claim-id' }, c.id),
+				el('span', { class: 'claim-meta' }, typeLabel + extra),
+			),
+			c.description ? el('div', { class: 'claim-desc' }, c.description) : null,
+			renderClaimData(c),
+		)
+		claimsCard.appendChild(claimNode)
+	}
+	out.appendChild(claimsCard)
+
+	out.appendChild(el('div', { class: 'muted' }, 'Tip: verify the issuer key against publicKeySource and validate the ECDSA signature over the canonicalized claims (SAVE framework).'))
+}
+
+const statusEl = document.getElementById('status')
+function setStatus(html, kind = 'info') {
+	statusEl.innerHTML = html ? `<div class="status ${kind}">${html}</div>` : ''
+}
+
+async function run() {
+	const raw = document.getElementById('input').value.trim()
+	if (!raw) return
+	const btn = document.getElementById('go')
+	btn.disabled = true
+	document.getElementById('output').innerHTML = ''
+	setStatus('<span class="spinner"></span> Working…')
+
+	try {
+		let hash = raw, txInfo = null
+		if (!/^0x?[0-9a-fA-F]{64}$/.test(raw)) throw new Error('Expected a 0x-prefixed 32-byte hex value')
+		if (!raw.startsWith('0x')) hash = '0x' + raw
+
+		// Heuristic: a tx hash and an attestationHash are visually identical (both 32 bytes).
+		// Try as attestationHash first; if IPFS gateways all 404, fall back to treating as tx hash.
+		let cid, attestation, gateway
+		try {
+			cid = hashToCid(hash)
+			setStatus(`<span class="spinner"></span> Fetching IPFS ${cid}…`)
+			const r = await fetchAttestation(cid)
+			attestation = r.attestation
+			gateway = r.gateway
+		} catch (firstErr) {
+			setStatus(`<span class="spinner"></span> Not found on IPFS, trying as tx hash…`)
+			try {
+				const t = await attestationHashFromTx(hash)
+				txInfo = t
+				cid = hashToCid(t.attestationHash)
+				setStatus(`<span class="spinner"></span> Found attestationHash from tx, fetching IPFS ${cid}…`)
+				const r = await fetchAttestation(cid)
+				attestation = r.attestation
+				gateway = r.gateway
+			} catch (secondErr) {
+				throw new Error(`Not found as attestationHash (${firstErr.message}) nor as tx hash (${secondErr.message})`)
+			}
+		}
+
+		const registry = await fetchRegistry()
+		const tokenName = tokenNameFor(registry, attestation.metadata?.proofId)
+		setStatus('')
+		renderAttestation(attestation, tokenName, cid, gateway, txInfo)
+	} catch (e) {
+		setStatus(e.message, 'error')
+	} finally {
+		btn.disabled = false
+	}
+}
+
+document.getElementById('go').addEventListener('click', run)
+document.getElementById('input').addEventListener('keydown', (e) => { if (e.key === 'Enter') run() })
+
+// Pre-fill from ?hash= or ?tx= query param
+const params = new URLSearchParams(location.search)
+const pre = params.get('hash') || params.get('tx')
+if (pre) { document.getElementById('input').value = pre; run() }
+</script>
+</body>
+</html>

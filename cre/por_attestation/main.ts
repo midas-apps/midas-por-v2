@@ -497,8 +497,10 @@ const runWorkflow = async (
 		// accounting (ops's NAV already excludes assets allocated to pending payouts).
 
 		// Unit matches the AUM unit: USD for most tokens, base currency (e.g. BTC) when
-		// `oneTokenApi.useNavBase` is set. Subtractions against AUM stay apples-to-apples
-		// only when both sides come from the same source pipeline.
+		// `oneTokenApi.useNavBase` is set. Email fields are always USD-denominated, so when
+		// `useNavBase` is true any email-sourced pending is converted to the base currency
+		// before accumulation to keep the unit consistent with the 1token-sourced portion.
+		const useNavBase = tokenConfig.oneTokenApi?.useNavBase === true
 		let pendingRedemption = 0
 		const prs = tokenConfig.pendingRedemptionSource
 		if (prs?.oneTokenWalletPattern && typeof oneTokenRawReport?.pendingRedemption === 'number') {
@@ -509,7 +511,8 @@ const runWorkflow = async (
 		if (prs?.emailFields && fundManagerEmailClaim) {
 			const extracted = extractNavFromEmail(fundManagerEmailClaim, prs.emailFields)
 			if (extracted !== null) {
-				pendingRedemption += extracted
+				const adjusted = useNavBase && oraclePriceUSD > 0 ? extracted / oraclePriceUSD : extracted
+				pendingRedemption += adjusted
 				runtime.log(`Pending redemption (email fields ${JSON.stringify(prs.emailFields)}): ${extracted.toFixed(0)} USD`)
 			}
 		}
@@ -562,6 +565,17 @@ const runWorkflow = async (
 		//     effective supply unreliable (e.g., 1token report down but a wallet
 		//     pattern was expected from it)
 
+		// For `useNavBase` tokens, `oneTokenOnchainAUM` and `pendingRedemption` are in the
+		// token's base currency (e.g. BTC). Method-1 supply (token count) and the
+		// overcollateralization ratio (USD per token / USD oracle) both require USD inputs,
+		// so we derive USD-converted versions here. The deviation log above keeps the
+		// original unit so the ops-vs-external comparison stays apples-to-apples in
+		// whichever unit ops reports in.
+		const oneTokenOnchainAUMUSD = oneTokenOnchainAUM !== null && useNavBase
+			? oneTokenOnchainAUM * oraclePriceUSD
+			: oneTokenOnchainAUM
+		const pendingRedemptionUSD = useNavBase ? pendingRedemption * oraclePriceUSD : pendingRedemption
+
 		let method1SupplyTokens: number | null = null
 
 		const requiresOneTokenForPending = prs?.oneTokenWalletPattern != null
@@ -578,7 +592,7 @@ const runWorkflow = async (
 			if (midasSupply) {
 				runtime.log(`Method-1 external supply: ${midasSupply.supply.toFixed(2)} tokens (${Object.keys(midasSupply.supplyByChain).length} chains)`)
 
-				const pendingTokens = pendingRedemption / oraclePriceUSD
+				const pendingTokens = pendingRedemptionUSD / oraclePriceUSD
 				const effectiveSupply = midasSupply.supply - pendingTokens
 				if (effectiveSupply > 0) {
 					method1SupplyTokens = effectiveSupply
@@ -614,21 +628,23 @@ const runWorkflow = async (
 			// So external AUMs (built from 1token + vlayer) must also exclude pending
 			// to stay apples-to-apples with the denominator.
 			// The "ops" candidate uses opsNavReportedByOps which is already net — no adj there.
-			const aumPendingAdj = pendingRedemption
+			// USD-converted values used here so the ratio is dimensionally consistent for
+			// useNavBase tokens (see derivation above).
+			const aumPendingAdj = pendingRedemptionUSD
 
-			if (oneTokenOnchainAUM !== null) {
+			if (oneTokenOnchainAUMUSD !== null) {
 				if (fm && !fm.navIsTotal && emailNavUSD !== null) {
-					const grossAUM = oneTokenOnchainAUM + emailNavUSD
+					const grossAUM = oneTokenOnchainAUMUSD + emailNavUSD
 					const totalAUM = grossAUM - aumPendingAdj
 					const ratio = computeRatio(totalAUM, supplyTokens)
-					runtime.log(`Candidate ${supplySource} 1token+fasanara_vlayer: ratio=${ratio.toFixed(4)}, AUM=${totalAUM.toFixed(0)} (1token=${oneTokenOnchainAUM.toFixed(0)}, vlayer=${emailNavUSD.toFixed(0)}${aumPendingAdj > 0 ? `, -pending=${aumPendingAdj.toFixed(0)}` : ''}), supply=${supplyTokens.toFixed(2)}`)
+					runtime.log(`Candidate ${supplySource} 1token+fasanara_vlayer: ratio=${ratio.toFixed(4)}, AUM=${totalAUM.toFixed(0)} (1token=${oneTokenOnchainAUMUSD.toFixed(0)}, vlayer=${emailNavUSD.toFixed(0)}${aumPendingAdj > 0 ? `, -pending=${aumPendingAdj.toFixed(0)}` : ''}), supply=${supplyTokens.toFixed(2)}`)
 					if (ratio > threshold) { selectedCandidate = { totalAUM, aumSource: '1token+fasanara_vlayer', supplyTokens, supplySource, ratio }; continue }
 				}
 
 				if (!selectedCandidate) {
-					const totalAUM = oneTokenOnchainAUM - aumPendingAdj
+					const totalAUM = oneTokenOnchainAUMUSD - aumPendingAdj
 					const ratio = computeRatio(totalAUM, supplyTokens)
-					runtime.log(`Candidate ${supplySource} 1token: ratio=${ratio.toFixed(4)}, AUM=${totalAUM.toFixed(0)}${aumPendingAdj > 0 ? ` (1token=${oneTokenOnchainAUM.toFixed(0)} -pending=${aumPendingAdj.toFixed(0)})` : ''}, supply=${supplyTokens.toFixed(2)}`)
+					runtime.log(`Candidate ${supplySource} 1token: ratio=${ratio.toFixed(4)}, AUM=${totalAUM.toFixed(0)}${aumPendingAdj > 0 ? ` (1token=${oneTokenOnchainAUMUSD.toFixed(0)} -pending=${aumPendingAdj.toFixed(0)})` : ''}, supply=${supplyTokens.toFixed(2)}`)
 					if (ratio > threshold) { selectedCandidate = { totalAUM, aumSource: '1token', supplyTokens, supplySource, ratio }; continue }
 				}
 			}

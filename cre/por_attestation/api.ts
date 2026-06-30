@@ -14,15 +14,17 @@ import { stringToBase64 } from '../library/utils.js'
 import { getNetworkByChainSelector } from '../library/config-schemas.js'
 
 /**
- * Vlayer verification result - raw response from vlayer API
+ * Vlayer v2 verification result — the unwrapped `data` payload from the API
+ * (the v2 wire response is `{ apiVersion, success, data, error? }`).
  */
 export interface VlayerVerificationResult {
 	success: boolean
 	serverDomain: string
 	notaryKeyFingerprint: string
+	tlsTimestamp?: number
 	request: {
 		body: string | null
-		headers: Array<[string, string]>
+		headers: string[]
 		method: string
 		raw: string
 		url: string
@@ -30,7 +32,7 @@ export interface VlayerVerificationResult {
 	}
 	response: {
 		body: string
-		headers: Array<[string, string]>
+		headers: string[]
 		raw: string
 		status: number
 		version: string
@@ -41,8 +43,9 @@ interface VlayerVerificationResultConsensus {
 	success: boolean
 	serverDomain: string
 	notaryKeyFingerprint: string
+	tlsTimestamp?: number
 	request: {
-		headers: Array<[string, string]>
+		headers: string[]
 		method: string
 		raw: string
 		url: string
@@ -50,7 +53,7 @@ interface VlayerVerificationResultConsensus {
 	}
 	response: {
 		body: string
-		headers: Array<[string, string]>
+		headers: string[]
 		raw: string
 		status: number
 		version: string
@@ -61,12 +64,12 @@ function verifyClaimWithVlayerInternal(
 	nodeRuntime: NodeRuntime<Config>,
 	proof: { data: string; version: string; meta: { notaryUrl: string } },
 	vlayerUrl: string,
-	clientId: string,
 	authToken: string
 ): VlayerVerificationResultConsensus {
-	const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-	if (clientId) headers['x-client-id'] = clientId
-	if (authToken) headers['Authorization'] = `Bearer ${authToken}`
+	const headers: Record<string, string> = {
+		'Content-Type': 'application/json',
+		'Authorization': `Bearer ${authToken}`,
+	}
 
 	const httpClient = new HTTPClient()
 	const body = stringToBase64(JSON.stringify(proof))
@@ -85,31 +88,37 @@ function verifyClaimWithVlayerInternal(
 		throw new Error(`vlayer verification failed with status ${response.statusCode}: ${errorBody}`)
 	}
 
-	const fullResponse = JSON.parse(new TextDecoder().decode(response.body))
+	const parsed = JSON.parse(new TextDecoder().decode(response.body))
+	if (!parsed.success) {
+		const code = parsed.error?.code ?? 'UNKNOWN'
+		const msg = parsed.error?.message ?? 'no message'
+		throw new Error(`vlayer verification failed: ${code} — ${msg}`)
+	}
+	const data = parsed.data ?? parsed
 
 	return {
-		success: fullResponse.success,
-		serverDomain: fullResponse.serverDomain,
-		notaryKeyFingerprint: fullResponse.notaryKeyFingerprint,
+		success: true,
+		serverDomain: data.serverDomain,
+		notaryKeyFingerprint: data.notaryKeyFingerprint,
+		tlsTimestamp: data.tlsTimestamp,
 		request: {
-			headers: fullResponse.request.headers,
-			method: fullResponse.request.method,
-			raw: fullResponse.request.raw,
-			url: fullResponse.request.url,
-			version: fullResponse.request.version,
+			headers: data.request.headers,
+			method: data.request.method,
+			raw: data.request.raw,
+			url: data.request.url,
+			version: data.request.version,
 		},
 		response: {
-			body: fullResponse.response.body,
-			headers: fullResponse.response.headers,
-			raw: fullResponse.response.raw,
-			status: fullResponse.response.status,
-			version: fullResponse.response.version,
+			body: data.response.body,
+			headers: data.response.headers,
+			raw: data.response.raw,
+			status: data.response.status,
+			version: data.response.version,
 		},
 	}
 }
 
-const VLAYER_URL = 'https://web-prover.vlayer.xyz/api/v1/verify'
-const VLAYER_CLIENT_ID = '3fa54803-7047-41af-bf4b-0e73db72ae63'
+const VLAYER_URL = 'https://web-prover.production.vlayer.xyz/api/v2.0/verify'
 
 /**
  * Verify Vlayer claim with DON consensus.
@@ -125,7 +134,6 @@ export async function verifyClaimWithVlayer(
 			nodeRuntime,
 			proofData,
 			VLAYER_URL,
-			VLAYER_CLIENT_ID,
 			authToken
 		),
 		consensusIdenticalAggregation<VlayerVerificationResultConsensus>()
@@ -135,6 +143,7 @@ export async function verifyClaimWithVlayer(
 		success: consensus.success,
 		serverDomain: consensus.serverDomain,
 		notaryKeyFingerprint: consensus.notaryKeyFingerprint,
+		tlsTimestamp: consensus.tlsTimestamp,
 		request: {
 			body: null,
 			headers: consensus.request.headers,

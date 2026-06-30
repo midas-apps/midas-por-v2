@@ -48,21 +48,21 @@ export async function verifyZkTlsNotaryProof(
   options?: VerifyZkTlsNotaryOptions,
 ): Promise<ZkTlsNotaryVerificationResult> {
   try {
-    if (!options?.clientId || !options?.authToken) {
+    if (!options?.authToken) {
       return {
         success: false,
         serverDomain: proof.serverDomain,
         notaryKeyFingerprint: proof.notaryKeyFingerprint,
         responseData: null,
-        error: 'Vlayer authentication credentials (clientId and authToken) are required',
+        error: 'Vlayer authToken is required',
       };
     }
 
     const httpClient = options.httpClient ?? new FetchHttpClient();
 
+    // v2: single bearer header, no x-client-id
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      'x-client-id': options.clientId,
       'Authorization': `Bearer ${options.authToken}`,
     };
 
@@ -82,18 +82,21 @@ export async function verifyZkTlsNotaryProof(
       };
     }
 
-    const result = JSON.parse(response.body) as any;
+    const wire = JSON.parse(response.body) as any;
 
-    // Parse the Vlayer response
-    if (!result.success) {
+    // v2: { apiVersion, success, data, error? } — unwrap; tolerate unwrapped (defensive)
+    if (!wire.success) {
+      const code = wire.error?.code ?? 'UNKNOWN';
+      const msg = wire.error?.message ?? wire.error ?? 'Vlayer verification failed';
       return {
         success: false,
         serverDomain: proof.serverDomain,
         notaryKeyFingerprint: proof.notaryKeyFingerprint,
         responseData: null,
-        error: result.error || 'Vlayer verification failed',
+        error: `${code}: ${msg}`,
       };
     }
+    const result = wire.data ?? wire;
 
     // Validate against expected data if provided
     // Compare only the fields present in expectedData against the vlayer result.
@@ -207,7 +210,7 @@ export function createVlayerProof(options: {
     mechanism: 'zk_tls_notary',
     platform: 'vlayer',
     proof: options.proofData,
-    verificationEndpoint: options.verificationEndpoint || 'https://web-prover.vlayer.xyz/api/v1/verify',
+    verificationEndpoint: options.verificationEndpoint || 'https://web-prover.production.vlayer.xyz/api/v2.0/verify',
     serverDomain: options.serverDomain,
     notaryKeyFingerprint: options.notaryKeyFingerprint,
   };

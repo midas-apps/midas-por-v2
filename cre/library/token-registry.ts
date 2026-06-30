@@ -22,32 +22,32 @@ export interface TokenRegistryConfig {
 }
 
 const DEFAULT_TIMEOUT = '10s'
-const DEFAULT_CACHE_MAX_AGE = '30s'
 
 /**
- * Fetch the token registry JSON from the configured URL.
- * Single-shot to keep the per-workflow HTTP budget bounded — the workflow
- * falls back to inline `config.tokens` if this call fails, so a second URL
- * mirror is not worth the budget cost.
+ * Fetch the token registry JSON from the configured URL, with optional fallback.
+ * Both URLs are attempted in order; on any error or non-200 the next source is tried.
+ * The workflow falls back to inline `config.tokens` if all sources fail.
  * Must be called from inside runInNodeMode with consensusIdenticalAggregation.
  */
 export function fetchTokenRegistry<T>(
 	nodeRuntime: NodeRuntime<T>,
 	cfg: TokenRegistryConfig,
 ): TokenRegistryFile {
-	const sources: string[] = [cfg.url]
+	const sources: string[] = cfg.fallbackUrl ? [cfg.url, cfg.fallbackUrl] : [cfg.url]
 
 	const httpClient = new HTTPClient()
 	let lastError = 'no sources tried'
 
 	for (const url of sources) {
 		try {
+			// No `Accept` header and no `cacheSettings` — minimal request to maximize DON
+			// HTTP capability compatibility (some response headers trigger [3]InvalidArgument
+			// upstream when those request fields are set).
 			const response = httpClient.sendRequest(nodeRuntime, {
 				url,
 				method: 'GET' as const,
-				headers: { 'Accept': 'application/json' },
+				headers: {},
 				timeout: DEFAULT_TIMEOUT,
-				cacheSettings: { store: true, maxAge: DEFAULT_CACHE_MAX_AGE },
 			}).result()
 
 			if (response.statusCode !== 200) {
