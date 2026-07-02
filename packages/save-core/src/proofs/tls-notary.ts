@@ -66,9 +66,19 @@ export async function verifyZkTlsNotaryProof(
       'Authorization': `Bearer ${options.authToken}`,
     };
 
+    // vlayer v2 is strict on the request body and rejects unknown fields with
+    // INVALID_REQUEST. Legacy IPFS-stored proofs may carry extras like `success`
+    // alongside `data`/`version`/`meta` — keep only the accepted keys.
+    const p = proof.proof as { data: string; version: string; meta: { notaryUrl: string }; [k: string]: unknown };
+    const minimalProof = {
+      data: p.data,
+      version: p.version,
+      meta: { notaryUrl: p.meta?.notaryUrl },
+    };
+
     const response = await httpClient.post(
       proof.verificationEndpoint,
-      JSON.stringify(proof.proof),
+      JSON.stringify(minimalProof),
       headers,
     );
 

@@ -162,7 +162,7 @@ function summarize(attestation, tokenName) {
 			lines.push(`    type          : ${data.overcollateralizationType}`)
 			lines.push(`    aumSource     : ${data.aumSource}`)
 			lines.push(`    supplySource  : ${data.supplySource}`)
-			lines.push(`    AUM           : ${data.oneTokenAUM ?? data.totalSupplyTokens ?? '-'}`)
+			lines.push(`    Total reserve : ${data.totalReserveUSD ?? data.oneTokenAUM ?? '-'} USD  (compare against supplyTokens × oraclePrice)`)
 			lines.push(`    supply tokens : ${data.supplyTokens ?? data.totalSupplyTokens ?? '-'}`)
 			lines.push(`    navPerToken   : ${data.navPerToken}`)
 			lines.push(`    oraclePrice   : ${data.oraclePriceFormatted}`)

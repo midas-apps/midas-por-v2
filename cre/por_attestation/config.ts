@@ -51,6 +51,16 @@ const oneTokenApiSchema = z.object({
 	// For tokens where 1token data is known to lag, set e.g. `[4]` for a single
 	// -4h shot or `[0, 4]` to try fresh then fall back to 4h-old data.
 	timestampOffsetHoursBack: z.array(z.number().int().nonnegative()).default([0, 1]),
+	// Sub-keys of `assets_and_liabilities_by_protocol.equity` that represent
+	// off-chain valuation (synthetic OTC accounts, fund-share placeholders).
+	// Their values are subtracted from `equity.total` to obtain the strictly
+	// on-chain AUM. The off-chain portion is recovered separately from the
+	// vlayer-notarized fund manager email.
+	// Default `[]` = no filtering, use `equity.total` as-is. Set to
+	// `["general_wallet"]` (1token's current label for the synthetic OTC account)
+	// once 1token deploys the fix that re-tags off-chain assets — otherwise the
+	// off-chain portion would be double-counted (once in 1token, once in the email).
+	offchainEquityKeys: z.array(z.string()).default([]),
 })
 
 const tokenRegistrySchema = z

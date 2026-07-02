@@ -309,7 +309,7 @@ const runWorkflow = async (
 			throw new Error('Invalid ops claim: missing token, totalSupplyCrossChainReportedByOps, or navReportedByOps')
 		}
 
-		runtime.log(`Ops claim: token=${opsClaimData.token}, navReportedByOps=${opsClaimData.navReportedByOps}, supply=${opsClaimData.totalSupplyCrossChainReportedByOps}`)
+		runtime.log(`Ops claim: token=${opsClaimData.token}, navReportedByOps=${opsClaimData.navReportedByOps}, supply=${opsClaimData.totalSupplyCrossChainReportedByOps}${opsClaimData.totalSupplyOnchain ? `, totalSupplyOnchain=${opsClaimData.totalSupplyOnchain}` : ''}`)
 
 		// 2. Read oracle price on-chain
 
@@ -590,16 +590,12 @@ const runWorkflow = async (
 			const midasSupply = fetchMidasTotalSupply(runtime, tokenConfig.address, eventTsSec, tokenConfig.chainSelectorName)
 
 			if (midasSupply) {
-				runtime.log(`Method-1 external supply: ${midasSupply.supply.toFixed(2)} tokens (${Object.keys(midasSupply.supplyByChain).length} chains)`)
-
-				const pendingTokens = pendingRedemptionUSD / oraclePriceUSD
-				const effectiveSupply = midasSupply.supply - pendingTokens
-				if (effectiveSupply > 0) {
-					method1SupplyTokens = effectiveSupply
-					runtime.log(`Method-1 effective supply: ${effectiveSupply.toFixed(2)} tokens (gross=${midasSupply.supply.toFixed(2)} - pending=${pendingTokens.toFixed(2)})`)
-				} else {
-					runtime.log(`WARN: Method-1 effective supply <= 0, skipping method-1`)
-				}
+				// Method-1 supply is the gross on-chain totalSupply cross-chain (matches what an
+				// external observer computes via `totalSupply()`). The paired method-1 AUM
+				// (1token portfolio + optional vlayer email) is also gross, so the ratio is a
+				// clean gross-vs-gross comparison an auditor can reproduce.
+				method1SupplyTokens = midasSupply.supply
+				runtime.log(`Method-1 external supply (gross): ${midasSupply.supply.toFixed(2)} tokens (${Object.keys(midasSupply.supplyByChain).length} chains)`)
 			}
 		}
 
@@ -622,15 +618,13 @@ const runWorkflow = async (
 		for (const { tokens: supplyTokens, source: supplySource } of trySupplies) {
 			if (selectedCandidate) break
 
-			// All supplies in the candidates loop are circulating (net of pending payouts):
-			//   - method-1 supply = endpoint - pending (computed above)
-			//   - method-2 supply = ops totalSupplyCrossChainReportedByOps (already net)
-			// So external AUMs (built from 1token + vlayer) must also exclude pending
-			// to stay apples-to-apples with the denominator.
-			// The "ops" candidate uses opsNavReportedByOps which is already net — no adj there.
-			// USD-converted values used here so the ratio is dimensionally consistent for
-			// useNavBase tokens (see derivation above).
-			const aumPendingAdj = pendingRedemptionUSD
+			// method-1 pairs the Midas endpoint GROSS supply with a GROSS AUM (1token portfolio
+			// + optional vlayer email, no pending subtraction) — matches what an external
+			// auditor computes from `totalSupply()` × oracle price × threshold.
+			// method-2 pairs the ops NET supply with NET AUM (subtract pending from 1token-based
+			// AUM candidates) to stay apples-to-apples with ops's own net accounting when we
+			// use ops's supply.
+			const aumPendingAdj = supplySource === 'method-1' ? 0 : pendingRedemptionUSD
 
 			if (oneTokenOnchainAUMUSD !== null) {
 				if (fm && !fm.navIsTotal && emailNavUSD !== null) {

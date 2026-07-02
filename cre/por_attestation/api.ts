@@ -72,7 +72,16 @@ function verifyClaimWithVlayerInternal(
 	}
 
 	const httpClient = new HTTPClient()
-	const body = stringToBase64(JSON.stringify(proof))
+	// vlayer v2 is strict on the request body: it rejects unknown fields with
+	// INVALID_REQUEST. Some IPFS-stored proofs (legacy v1 captures) carry extra
+	// fields like `success` alongside `data`/`version`/`meta` — strip everything
+	// but the three accepted keys before POSTing.
+	const minimalProof = {
+		data: proof.data,
+		version: proof.version,
+		meta: { notaryUrl: proof.meta?.notaryUrl },
+	}
+	const body = stringToBase64(JSON.stringify(minimalProof))
 
 	const response = httpClient.sendRequest(nodeRuntime, {
 		url: vlayerUrl,
@@ -127,7 +136,7 @@ export async function verifyClaimWithVlayer(
 	runtime: Runtime<Config>,
 	proofData: any,
 ): Promise<VlayerVerificationResult> {
-	const authToken = runtime.getSecret({ id: 'vlayerauthtoken' }).result().value as string
+	const authToken = runtime.getSecret({ id: 'vlayerauthtokenv2' }).result().value as string
 
 	const consensus = runtime.runInNodeMode(
 		(nodeRuntime: NodeRuntime<Config>) => verifyClaimWithVlayerInternal(
@@ -337,6 +346,11 @@ export interface OneTokenReportData {
 	assets: Record<string, number>
 	liabilities: Record<string, number>
 	equity: Record<string, number>
+	/** equity.total minus the sum of off-chain entries listed in `offchainEquityKeys`
+	 *  (e.g. 1token's `general_wallet` synthetic OTC account). Represents the strictly
+	 *  on-chain valuation in millions USD. Off-chain portion is recovered from the
+	 *  vlayer-notarized fund manager email and added back downstream. */
+	equityOnchain: number
 	navBase?: number
 	/** Pending redemption extracted from nav_by_wallet entries matching the pattern. Unit matches the AUM unit: raw base currency (e.g. BTC) when useNavBase=true, USD otherwise (already converted from millions). Only present if a pattern was provided to fetch. */
 	pendingRedemption?: number
@@ -369,6 +383,7 @@ function fetchOneTokenReportInternal(
 	timestamp: string,
 	pendingPattern?: string,
 	useNavBase: boolean = false,
+	offchainEquityKeys: readonly string[] = [],
 ): OneTokenReportData {
 	const url = `${ONE_TOKEN_API_URL}?token=${tokenName}&timestamp=${timestamp}`
 
@@ -403,6 +418,16 @@ function fetchOneTokenReportInternal(
 	const sanitize = (obj: Record<string, unknown>): Record<string, number> =>
 		Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, typeof v === 'number' ? v : 0]))
 
+	const equity = sanitize(report.equity ?? {})
+	// Subtract the configured off-chain keys (default: ["general_wallet"]) from
+	// equity.total to isolate the strictly on-chain valuation. While the off-chain
+	// key is absent (current 1token bug where the synthetic OTC account doesn't get
+	// a protocol tag), the subtraction is a no-op and equityOnchain == equity.total
+	// — preserving today's behaviour. Once 1token fixes the tagging, the off-chain
+	// entry appears under `general_wallet` and is automatically excluded.
+	const offchainEquity = offchainEquityKeys.reduce((acc, k) => acc + (equity[k] ?? 0), 0)
+	const equityOnchain = (equity.total ?? 0) - offchainEquity
+
 	const navBaseCurrencyTotal = reports?.nav_by_chain?.pv_base?.total
 	const pendingRaw = pendingPattern ? sumNavByWalletPattern(reports, pendingPattern, useNavBase) : undefined
 	// pv_base is in raw base currency (e.g. BTC). pv_usd is in millions USD — convert to USD.
@@ -413,7 +438,8 @@ function fetchOneTokenReportInternal(
 	return {
 		assets: sanitize(report.assets ?? {}),
 		liabilities: sanitize(report.liabilities ?? {}),
-		equity: sanitize(report.equity ?? {}),
+		equity,
+		equityOnchain,
 		...(typeof navBaseCurrencyTotal === 'number' ? { navBase: navBaseCurrencyTotal } : {}),
 		...(typeof pending === 'number' ? { pendingRedemption: pending } : {}),
 	}
@@ -478,9 +504,10 @@ export function fetchSupplyDetails(
 export function fetchOneTokenReport(
 	runtime: Runtime<Config>,
 	timestamp: string,
-	oneTokenApi: { tokenName: string; useNavBase?: boolean },
+	oneTokenApi: { tokenName: string; useNavBase?: boolean; offchainEquityKeys?: readonly string[] },
 	pendingPattern?: string,
 ): OneTokenReportData | null {
+	const offchainEquityKeys = oneTokenApi.offchainEquityKeys ?? []
 	return runtime.runInNodeMode(
 		(nodeRuntime: NodeRuntime<Config>) => fetchOneTokenReportInternal(
 			nodeRuntime,
@@ -488,6 +515,7 @@ export function fetchOneTokenReport(
 			timestamp,
 			pendingPattern,
 			oneTokenApi.useNavBase ?? false,
+			offchainEquityKeys,
 		),
 		consensusIdenticalAggregation<OneTokenReportData>()
 	)().result()

@@ -310,7 +310,7 @@ const runWorkflow = async (
 			attestationData.claims.some((c: any) => c.id === 'fund_manager_claim')
 
 		if (hasVlayerClaim && runtime.config.vlayerEndpoint) {
-			const vlayerAuthToken = runtime.getSecret({ id: 'vlayerauthtoken' }).result().value as string
+			const vlayerAuthToken = runtime.getSecret({ id: 'vlayerauthtokenv2' }).result().value as string
 			verificationOptions.vlayerCredentials = {
 				clientId: runtime.config.vlayerEndpoint.clientId,
 				authToken: vlayerAuthToken,
