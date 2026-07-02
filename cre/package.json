@@ -7,7 +7,7 @@
     "por-attestation-workflow": "./por_attestation",
     "por-verification-workflow": "./por_verification",
     "pako": "2.1.0",
-    "viem": "2.50.3",
+    "viem": "2.53.1",
     "zod": "4.4.0"
   },
   "devDependencies": {
