@@ -15,12 +15,12 @@ export interface OpsClaimData {
 	priceUpdateTxHash: string
 	priceUpdateChainId: number
 	totalSupplyCrossChainReportedByOps: string // wei as decimal string (18 decimals) — net of tokens in the burn/redemption pipeline
-	// Gross totalSupply summed across all chains (wei as decimal string, 18 decimals). Matches what
-	// `totalSupply()` returns on-chain, including tokens still awaiting burn/redemption settlement.
-	// Optional — present when ops publishes the on-chain gross alongside the net figure, so
-	// external auditors can reconcile the attested net supply with the value they see on-chain.
-	totalSupplyOnchain?: string
-	navReportedByOps: string                   // collateral value in oracle denomination (USD for stablecoins, BTC for mHyperBTC)
+	navReportedByOps: string                   // collateral value net of pending payouts (in oracle denomination). Used in the ratio.
+	// Gross reserve in USD, computed by ops as (off-chain portfolio value from fund admin) + (on-chain TVL Midas holds).
+	// Optional — present when ops publishes it. Used only for public display on the Midas frontend;
+	// the overcollateralization ratio keeps using the net `navReportedByOps` (net-vs-net stays
+	// consistent while the burn/redemption pipeline is still in-flight).
+	navReportedByOpsGross?: string
 	tokenPriceReportedByOps: string            // token price in oracle denomination
 	oracleAddress: string                      // Chainlink price feed address
 	oracleChainSelectorName: string            // e.g. "ethereum-mainnet"
@@ -97,27 +97,36 @@ export function createInternalOvercollateralizationClaim(
 	const oraclePriceUSD = Number(oraclePriceData.answer) / Math.pow(10, oraclePriceData.decimals)
 	const ratio = oraclePriceUSD > 0 ? navPerToken / oraclePriceUSD : 0
 
+	const data: Record<string, unknown> = {
+		overcollateralizationType: 'method-2',
+		aumSource: 'ops_claim',
+		supplySource: 'ops_claim',
+		// ─── frontend display (gross) ───
+		// Comes from ops when they publish `navReportedByOpsGross` (their own calc: off-chain
+		// portfolio + on-chain TVL). Optional — present only when supplied.
+		// ─── ratio math (net) ───
+		totalReserveNetUSD: navUsed.toFixed(2),
+		supplyTokensNet: totalSupplyTokens.toFixed(6),
+		// ─── legacy fields (kept for backward compatibility with existing verifiers) ───
+		totalReserveUSD: navUsed.toFixed(2),          // alias of totalReserveNetUSD
+		supplyTokens: totalSupplyTokens.toFixed(6),    // alias of supplyTokensNet
+		navReportedByOps: opsClaimData.navReportedByOps,
+		totalSupplyCrossChainReportedByOps: opsClaimData.totalSupplyCrossChainReportedByOps,
+		totalSupplyTokens: totalSupplyTokens.toFixed(6),
+		navPerToken: navPerToken.toFixed(6),
+		oraclePriceFormatted: oraclePriceUSD.toFixed(9),
+		threshold,
+		ratio: parseFloat(ratio.toFixed(6)),
+		passed: ratio > threshold,
+	}
+	if (opsClaimData.navReportedByOpsGross != null) {
+		data.totalReserveGrossUSD = opsClaimData.navReportedByOpsGross
+	}
 	return new ObjectClaim({
 		id: 'overcollateralization',
 		format: 'json',
-		data: {
-			overcollateralizationType: 'method-2',
-			aumSource: 'ops_claim',
-			supplySource: 'ops_claim',
-			// Stable frontend-facing fields (same names/semantics regardless of method).
-			totalReserveUSD: navUsed.toFixed(2),
-			supplyTokens: totalSupplyTokens.toFixed(6),
-			// Legacy fields — kept unchanged for backward compatibility with existing verifiers.
-			navReportedByOps: opsClaimData.navReportedByOps,
-			totalSupplyCrossChainReportedByOps: opsClaimData.totalSupplyCrossChainReportedByOps,
-			totalSupplyTokens: totalSupplyTokens.toFixed(6),
-			navPerToken: navPerToken.toFixed(6),
-			oraclePriceFormatted: oraclePriceUSD.toFixed(9),
-			threshold,
-			ratio: parseFloat(ratio.toFixed(6)),
-			passed: ratio > threshold,
-		},
-		description: 'Overcollateralization check using ops NAV data (method-2 fallback). Frontend-facing fields: totalReserveUSD, supplyTokens.',
+		data,
+		description: 'Overcollateralization check using ops NAV data (method-2 fallback). Frontend reads totalReserveGrossUSD (from ops) for display; ratio uses totalReserveNetUSD / supplyTokensNet.',
 		proof: CRE_CONSENSUS_PROOF,
 	})
 }
@@ -147,11 +156,17 @@ export function createExternalOvercollateralizationClaim(
 		overcollateralizationType: 'method-1',
 		aumSource,
 		supplySource,
-		// Stable frontend-facing fields (same names/semantics regardless of method).
-		totalReserveUSD: totalAUM.toFixed(2),
-		supplyTokens: supplyTokens.toFixed(6),
-		// Legacy field — same value as totalReserveUSD, kept for backward compatibility.
-		oneTokenAUM: totalAUM.toFixed(2),
+		// ─── frontend display (gross) ───
+		// Reserve gross of pending payouts = 1token + vlayer email (no pending subtraction).
+		// Equivalent to totalReserveNetUSD + pendingRedemptionUSD.
+		totalReserveGrossUSD: (totalAUM + pendingRedemptionUSD).toFixed(2),
+		// ─── ratio math (net) ───
+		totalReserveNetUSD: totalAUM.toFixed(2),
+		supplyTokensNet: supplyTokens.toFixed(6),
+		// ─── legacy fields (kept for backward compatibility) ───
+		totalReserveUSD: totalAUM.toFixed(2),         // alias of totalReserveNetUSD
+		supplyTokens: supplyTokens.toFixed(6),         // alias of supplyTokensNet
+		oneTokenAUM: totalAUM.toFixed(2),              // alias of totalReserveNetUSD
 		pendingRedemptionUSD: pendingRedemptionUSD.toFixed(2),
 		totalSupplyCrossChainReportedByOps: opsClaimData.totalSupplyCrossChainReportedByOps,
 		totalSupplyTokens: totalSupplyTokens.toFixed(6),
