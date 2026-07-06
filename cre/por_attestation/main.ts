@@ -520,41 +520,51 @@ const runWorkflow = async (
 			runtime.log(`Pending redemption total: ${pendingRedemption.toFixed(0)} USD`)
 		}
 
-		// External NAV deviation vs ops — comparing apples-to-apples (both net of pending payouts)
+		// For `useNavBase` tokens, `oneTokenOnchainAUM` and `pendingRedemption` are in the
+		// token's base currency (e.g. BTC). Ops reports `navReportedByOps` in USD across
+		// all tokens, so every comparison and ratio downstream is USD-denominated. Convert
+		// the base-currency values here once so both the deviation log and the ratio math
+		// operate on apples-to-apples USD numbers.
+		const oneTokenOnchainAUMUSD = oneTokenOnchainAUM !== null && useNavBase
+			? oneTokenOnchainAUM * oraclePriceUSD
+			: oneTokenOnchainAUM
+		const pendingRedemptionUSD = useNavBase ? pendingRedemption * oraclePriceUSD : pendingRedemption
+
+		// External NAV deviation vs ops — comparing apples-to-apples in USD
 
 		{
 			const fm = tokenConfig.fundManager
 			const opsNavUsed = parseFloat(opsClaimData.navReportedByOps)
 
-			let externalAUMGross: number | null = null
+			let externalAUMGrossUSD: number | null = null
 			let externalLabel: string = ''
-			if (oneTokenOnchainAUM !== null && fm && !fm.navIsTotal && emailNavUSD !== null) {
-				externalAUMGross = oneTokenOnchainAUM + emailNavUSD
+			if (oneTokenOnchainAUMUSD !== null && fm && !fm.navIsTotal && emailNavUSD !== null) {
+				externalAUMGrossUSD = oneTokenOnchainAUMUSD + emailNavUSD
 				externalLabel = '1token+fasanara_vlayer'
 			} else if (fm?.navIsTotal && emailNavUSD !== null) {
-				externalAUMGross = emailNavUSD
+				externalAUMGrossUSD = emailNavUSD
 				externalLabel = 'vlayer_total'
-			} else if (oneTokenOnchainAUM !== null) {
-				externalAUMGross = oneTokenOnchainAUM
+			} else if (oneTokenOnchainAUMUSD !== null) {
+				externalAUMGrossUSD = oneTokenOnchainAUMUSD
 				externalLabel = '1token'
 			}
 
-			if (externalAUMGross !== null && opsNavUsed > 0) {
-				const externalAUMNet = externalAUMGross - pendingRedemption
+			if (externalAUMGrossUSD !== null && opsNavUsed > 0) {
+				const externalAUMNetUSD = externalAUMGrossUSD - pendingRedemptionUSD
 				const opsNetForDev = tokenConfig.opsNavIsNetOfPending
 					? opsNavUsed
-					: opsNavUsed - pendingRedemption
+					: opsNavUsed - pendingRedemptionUSD
 				if (opsNetForDev <= 0) {
-					throw new Error(`Invalid ops NAV for deviation: opsNetForDev=${opsNetForDev} (opsNavUsed=${opsNavUsed}, pending=${pendingRedemption}, opsNavIsNetOfPending=${!!tokenConfig.opsNavIsNetOfPending}) — pending exceeds NAV or ops payload is malformed`)
+					throw new Error(`Invalid ops NAV for deviation: opsNetForDev=${opsNetForDev} (opsNavUsed=${opsNavUsed}, pendingUSD=${pendingRedemptionUSD}, opsNavIsNetOfPending=${!!tokenConfig.opsNavIsNetOfPending}) — pending exceeds NAV or ops payload is malformed`)
 				}
-				const dev = Math.abs((externalAUMNet - opsNetForDev) / opsNetForDev) * 100
-				runtime.log(`External NAV (${externalLabel}) vs ops deviation: external_net=${externalAUMNet.toFixed(0)} (gross=${externalAUMGross.toFixed(0)} - pending=${pendingRedemption.toFixed(0)}), ops_net=${opsNetForDev.toFixed(0)} (raw=${opsNavUsed.toFixed(0)}${tokenConfig.opsNavIsNetOfPending ? ' already net' : ' - pending'}), deviation=${dev.toFixed(2)}% (threshold: ${deviationThreshold}%)${dev > deviationThreshold ? ' ⚠ EXCEEDS THRESHOLD' : ''}`)
+				const dev = Math.abs((externalAUMNetUSD - opsNetForDev) / opsNetForDev) * 100
+				runtime.log(`External NAV (${externalLabel}) vs ops deviation: external_net=${externalAUMNetUSD.toFixed(0)} USD (gross=${externalAUMGrossUSD.toFixed(0)} - pending=${pendingRedemptionUSD.toFixed(0)}), ops_net=${opsNetForDev.toFixed(0)} USD (raw=${opsNavUsed.toFixed(0)}${tokenConfig.opsNavIsNetOfPending ? ' already net' : ' - pending'}), deviation=${dev.toFixed(2)}% (threshold: ${deviationThreshold}%)${dev > deviationThreshold ? ' ⚠ EXCEEDS THRESHOLD' : ''}`)
 			}
 
-			// Cross-check sanity: if navIsTotal=true, log deviation vlayer vs 1token (both estimate total)
-			if (fm?.navIsTotal && emailNavUSD !== null && oneTokenOnchainAUM !== null && oneTokenOnchainAUM > 0) {
-				const dev = Math.abs((emailNavUSD - oneTokenOnchainAUM) / oneTokenOnchainAUM) * 100
-				runtime.log(`Cross-check vlayer_total vs 1token: vlayer=${emailNavUSD.toFixed(0)}, 1token=${oneTokenOnchainAUM.toFixed(0)}, deviation=${dev.toFixed(2)}%${dev > deviationThreshold ? ' ⚠' : ''}`)
+			// Cross-check sanity: if navIsTotal=true, log deviation vlayer vs 1token (both estimate total, both USD)
+			if (fm?.navIsTotal && emailNavUSD !== null && oneTokenOnchainAUMUSD !== null && oneTokenOnchainAUMUSD > 0) {
+				const dev = Math.abs((emailNavUSD - oneTokenOnchainAUMUSD) / oneTokenOnchainAUMUSD) * 100
+				runtime.log(`Cross-check vlayer_total vs 1token: vlayer=${emailNavUSD.toFixed(0)} USD, 1token=${oneTokenOnchainAUMUSD.toFixed(0)} USD, deviation=${dev.toFixed(2)}%${dev > deviationThreshold ? ' ⚠' : ''}`)
 			}
 		}
 
@@ -564,17 +574,6 @@ const runWorkflow = async (
 		//   - the configured pending source(s) failed to return data, making the
 		//     effective supply unreliable (e.g., 1token report down but a wallet
 		//     pattern was expected from it)
-
-		// For `useNavBase` tokens, `oneTokenOnchainAUM` and `pendingRedemption` are in the
-		// token's base currency (e.g. BTC). Method-1 supply (token count) and the
-		// overcollateralization ratio (USD per token / USD oracle) both require USD inputs,
-		// so we derive USD-converted versions here. The deviation log above keeps the
-		// original unit so the ops-vs-external comparison stays apples-to-apples in
-		// whichever unit ops reports in.
-		const oneTokenOnchainAUMUSD = oneTokenOnchainAUM !== null && useNavBase
-			? oneTokenOnchainAUM * oraclePriceUSD
-			: oneTokenOnchainAUM
-		const pendingRedemptionUSD = useNavBase ? pendingRedemption * oraclePriceUSD : pendingRedemption
 
 		let method1SupplyTokens: number | null = null
 
@@ -689,8 +688,12 @@ const runWorkflow = async (
 				threshold,
 				selectedCandidate.supplyTokens,
 				selectedCandidate.supplySource,
-				pendingRedemption,
-				oneTokenOnchainAUM,
+				// Always pass USD-denominated values to the claim builder — for `useNavBase`
+				// tokens (e.g. mHyperBTC) the raw `pendingRedemption` / `oneTokenOnchainAUM`
+				// are in the base currency (BTC). Mixing them with USD `totalAUM` in the
+				// claim would produce nonsensical `totalReserveGrossUSD`.
+				pendingRedemptionUSD,
+				oneTokenOnchainAUMUSD,
 				emailNavUSD,
 			)
 

@@ -153,9 +153,17 @@ export async function verifyZkTlsNotaryProof(
         return projected;
       };
 
-      const projectedResult = projectToExpectedKeys(result, expectedData);
+      // vlayer v2's /verify endpoint no longer returns `success` inside `data`
+      // (it lives at the wire level: `wire.success`). Legacy attestations built
+      // by pre-fix attesters have `success:true` stored in claim.data — strip it
+      // from expectedData so old attestations still validate.
+      const strippedExpected = (expectedData && typeof expectedData === 'object' && !Array.isArray(expectedData))
+        ? Object.fromEntries(Object.entries(expectedData as Record<string, unknown>).filter(([k]) => k !== 'success'))
+        : expectedData;
+
+      const projectedResult = projectToExpectedKeys(result, strippedExpected);
       const canonicalResult = JSON.stringify(canonicalize(projectedResult));
-      const canonicalExpected = JSON.stringify(canonicalize(expectedData));
+      const canonicalExpected = JSON.stringify(canonicalize(strippedExpected));
       const dataMatch = canonicalResult === canonicalExpected;
 
       if (!dataMatch) {

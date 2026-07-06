@@ -216,10 +216,15 @@ export function createFundManagerEmailClaim(
 		notaryKeyFingerprint: vlayerVerificationResult.notaryKeyFingerprint,
 	})
 
+	// vlayer v2's /verify endpoint no longer returns `success` inside its `data` field
+	// (it's only at the wire level). Storing it here made verifiers see a phantom
+	// `success:true` in expectedData that's not in the re-verified result → canonical
+	// mismatch. Strip it before storing.
+	const { success: _drop, ...claimData } = vlayerVerificationResult
 	return new ObjectClaim({
 		id: 'fund_manager_claim',
 		format: 'json',
-		data: vlayerVerificationResult as unknown as Record<string, unknown>,
+		data: claimData as unknown as Record<string, unknown>,
 		description: 'Total NAV reported by fund manager (Vlayer TLS verified)',
 		proof: tlsNotaryProof,
 	})
