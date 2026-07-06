@@ -408,7 +408,12 @@ function fetchOneTokenReportInternal(
 
 	const fullResponse = JSON.parse(bodyText)
 	const reports = fullResponse?.reports
-	const report = reports?.assets_and_liabilities_by_protocol
+	// 1token renamed `assets_and_liabilities_by_protocol` → `assets_by_protocol`.
+	// New schema INCLUDES `general_wallet` (the synthetic OTC account for off-chain fund
+	// shares) in `equity.total` — so we now must subtract `equity[offchainEquityKeys]`
+	// to isolate the strictly on-chain portion. Keep the old field name as a fallback
+	// for cached / historical responses.
+	const report = reports?.assets_by_protocol ?? reports?.assets_and_liabilities_by_protocol
 
 	if (!report || typeof report.equity?.total !== 'number') {
 		throw new Error(`1token response missing equity.total. Body: ${bodyText.slice(0, 300)}`)
@@ -419,12 +424,8 @@ function fetchOneTokenReportInternal(
 		Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, typeof v === 'number' ? v : 0]))
 
 	const equity = sanitize(report.equity ?? {})
-	// Subtract the configured off-chain keys (default: ["general_wallet"]) from
-	// equity.total to isolate the strictly on-chain valuation. While the off-chain
-	// key is absent (current 1token bug where the synthetic OTC account doesn't get
-	// a protocol tag), the subtraction is a no-op and equityOnchain == equity.total
-	// — preserving today's behaviour. Once 1token fixes the tagging, the off-chain
-	// entry appears under `general_wallet` and is automatically excluded.
+	// Subtract off-chain keys (default `general_wallet`) to isolate the on-chain
+	// equity. For mFONE: 72.6M total − 69.6M general_wallet = 3.03M on-chain.
 	const offchainEquity = offchainEquityKeys.reduce((acc, k) => acc + (equity[k] ?? 0), 0)
 	const equityOnchain = (equity.total ?? 0) - offchainEquity
 

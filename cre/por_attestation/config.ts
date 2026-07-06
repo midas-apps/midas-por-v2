@@ -47,20 +47,18 @@ const oneTokenApiSchema = z.object({
 	useNavBase: z.boolean().default(false),
 	// Hours back to try when fetching the 1token snapshot, in priority order.
 	// Each entry costs one HTTP call (max budget concern). Workflow stops at the
-	// first successful fetch. Default `[0, 1]` tries the exact hour, then -1h.
-	// For tokens where 1token data is known to lag, set e.g. `[4]` for a single
-	// -4h shot or `[0, 4]` to try fresh then fall back to 4h-old data.
-	timestampOffsetHoursBack: z.array(z.number().int().nonnegative()).default([0, 1]),
-	// Sub-keys of `assets_and_liabilities_by_protocol.equity` that represent
-	// off-chain valuation (synthetic OTC accounts, fund-share placeholders).
-	// Their values are subtracted from `equity.total` to obtain the strictly
-	// on-chain AUM. The off-chain portion is recovered separately from the
-	// vlayer-notarized fund manager email.
-	// Default `[]` = no filtering, use `equity.total` as-is. Set to
-	// `["general_wallet"]` (1token's current label for the synthetic OTC account)
-	// once 1token deploys the fix that re-tags off-chain assets — otherwise the
-	// off-chain portion would be double-counted (once in 1token, once in the email).
-	offchainEquityKeys: z.array(z.string()).default([]),
+	// first successful fetch. Default `[0, 1, 2, 3, 4]` tries the exact anchor
+	// hour then walks back 1h at a time up to 4h — resilient to the Midas
+	// transparency endpoint's occasional 2-3h publication lag.
+	timestampOffsetHoursBack: z.array(z.number().int().nonnegative()).default([0, 1, 2, 3, 4]),
+	// Sub-keys of `assets_by_protocol.equity` that represent off-chain valuation
+	// (synthetic OTC accounts, fund-share placeholders). Their values are
+	// subtracted from `equity.total` to obtain the strictly on-chain AUM. The
+	// off-chain portion is recovered separately from the vlayer-notarized fund
+	// manager email — mixing both would double-count.
+	// Default `["general_wallet"]` matches 1token's current label for the
+	// synthetic OTC account (Fasanara / M1 / JTC fund shares).
+	offchainEquityKeys: z.array(z.string()).default(['general_wallet']),
 })
 
 const tokenRegistrySchema = z
