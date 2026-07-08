@@ -18,7 +18,7 @@ import { decodeAbiParameters, encodeFunctionData, decodeFunctionResult, zeroAddr
 import { SaveRegistryWithClaim } from '../contracts/abi/SaveRegistryWithClaim.js'
 import { configSchema, type Config, type TokenConfig, getNetworkByChainSelector } from './config.js'
 import { CRE_CONFIDENCE_MAP, getBlockNumberByConfidence } from '../library/config-schemas.js'
-import { verifyClaimWithVlayer, readOraclePrice, fetchOneTokenReport, fetchSupplyDetails, fetchMidasTotalSupply, extractNavFromEmail, readOnchainTotalSupply } from './api.js'
+import { verifyClaimWithVlayer, readOraclePrice, fetchOneTokenReport, fetchSupplyDetails, fetchMidasTotalSupply, extractNavFromEmail, readOnchainTotalSupply, readErc20BalanceDecimal } from './api.js'
 import type { OneTokenReportData, OnchainSupplyData } from './api.js'
 import { hashToIPFSCid, ipfsCidToHash } from '../library/utils.js'
 import { fetchFromIpfs, pushToIpfsPinata, compressJson, decompressJson } from '../library/ipfs.js'
@@ -520,6 +520,40 @@ const runWorkflow = async (
 			runtime.log(`Pending redemption total: ${pendingRedemption.toFixed(0)} USD`)
 		}
 
+		// On-chain reserve additions — sum USDC balances at configured wallets
+		// (Settlement Funds in Process, Reserve, Fee Recipient, etc. — wallets
+		// that hold backing assets the 1token endpoint doesn't cover). Any failure
+		// on a single balanceOf call skips that wallet (non-fatal). Total is
+		// added to the external gross reserve before pending-redemption netting.
+		let onchainReserveUSD = 0
+		const roc = tokenConfig.reserveOnchainWallets
+		if (roc && roc.usdcWallets.length > 0) {
+			for (const wallet of roc.usdcWallets) {
+				try {
+					const bal = readErc20BalanceDecimal(runtime, roc.usdcAddress, wallet, tokenConfig.chainSelectorName, 6)
+					onchainReserveUSD += bal
+					runtime.log(`Reserve on-chain USDC ${wallet.slice(0, 10)}...: $${bal.toFixed(2)}`)
+				} catch (e) {
+					runtime.log(`WARN: reserve on-chain USDC balanceOf failed for ${wallet}: ${e instanceof Error ? e.message : String(e)}`)
+				}
+			}
+			for (const entry of roc.otherTokens) {
+				try {
+					const bal = readErc20BalanceDecimal(runtime, entry.token, entry.wallet, tokenConfig.chainSelectorName, 18)
+					const priceRaw = readOraclePrice(runtime, entry.priceOracle, tokenConfig.chainSelectorName, entry.priceDecimals)
+					const priceUSD = Number(priceRaw.answer) / Math.pow(10, entry.priceDecimals)
+					const valueUSD = bal * priceUSD
+					onchainReserveUSD += valueUSD
+					runtime.log(`Reserve on-chain ${entry.label || 'token'} ${entry.wallet.slice(0, 10)}...: ${bal.toFixed(4)} × $${priceUSD.toFixed(6)} = $${valueUSD.toFixed(2)}`)
+				} catch (e) {
+					runtime.log(`WARN: reserve on-chain otherToken failed for ${entry.wallet}: ${e instanceof Error ? e.message : String(e)}`)
+				}
+			}
+			if (onchainReserveUSD > 0) {
+				runtime.log(`Reserve on-chain total: $${onchainReserveUSD.toFixed(2)}`)
+			}
+		}
+
 		// For `useNavBase` tokens, `oneTokenOnchainAUM` and `pendingRedemption` are in the
 		// token's base currency (e.g. BTC). Ops reports `navReportedByOps` in USD across
 		// all tokens, so every comparison and ratio downstream is USD-denominated. Convert
@@ -591,11 +625,30 @@ const runWorkflow = async (
 			if (midasSupply) {
 				runtime.log(`Method-1 external supply: ${midasSupply.supply.toFixed(2)} tokens (${Object.keys(midasSupply.supplyByChain).length} chains)`)
 
+				// Supply exclusions: subtract on-chain balances of the primary token in
+				// configured non-circulating wallets (redemption vault, burn queue, LP
+				// waiting-to-burn). Each failed balanceOf is treated as 0 (skipped).
+				let onchainExclusions = 0
+				if (tokenConfig.supplyExclusionWallets && tokenConfig.supplyExclusionWallets.length > 0 && tokenConfig.address) {
+					for (const wallet of tokenConfig.supplyExclusionWallets) {
+						try {
+							const bal = readErc20BalanceDecimal(runtime, tokenConfig.address, wallet, tokenConfig.chainSelectorName, 18)
+							onchainExclusions += bal
+							runtime.log(`Supply exclusion ${wallet.slice(0, 10)}...: ${bal.toFixed(2)} tokens`)
+						} catch (e) {
+							runtime.log(`WARN: supply exclusion balanceOf failed for ${wallet}: ${e instanceof Error ? e.message : String(e)}`)
+						}
+					}
+					if (onchainExclusions > 0) {
+						runtime.log(`Supply exclusions total: ${onchainExclusions.toFixed(2)} tokens`)
+					}
+				}
+
 				const pendingTokens = pendingRedemptionUSD / oraclePriceUSD
-				const effectiveSupply = midasSupply.supply - pendingTokens
+				const effectiveSupply = midasSupply.supply - pendingTokens - onchainExclusions
 				if (effectiveSupply > 0) {
 					method1SupplyTokens = effectiveSupply
-					runtime.log(`Method-1 effective supply: ${effectiveSupply.toFixed(2)} tokens (gross=${midasSupply.supply.toFixed(2)} - pending=${pendingTokens.toFixed(2)})`)
+					runtime.log(`Method-1 effective supply: ${effectiveSupply.toFixed(2)} tokens (gross=${midasSupply.supply.toFixed(2)} - pending=${pendingTokens.toFixed(2)}${onchainExclusions > 0 ? ` - onchainExclusions=${onchainExclusions.toFixed(2)}` : ''})`)
 				} else {
 					runtime.log(`WARN: Method-1 effective supply <= 0, skipping method-1`)
 				}
@@ -630,15 +683,15 @@ const runWorkflow = async (
 
 			if (oneTokenOnchainAUMUSD !== null) {
 				if (fm && !fm.navIsTotal && emailNavUSD !== null) {
-					const grossAUM = oneTokenOnchainAUMUSD + emailNavUSD
+					const grossAUM = oneTokenOnchainAUMUSD + emailNavUSD + onchainReserveUSD
 					const totalAUM = grossAUM - aumPendingAdj
 					const ratio = computeRatio(totalAUM, supplyTokens)
-					runtime.log(`Candidate ${supplySource} 1token+fasanara_vlayer: ratio=${ratio.toFixed(4)}, AUM=${totalAUM.toFixed(0)} (1token=${oneTokenOnchainAUMUSD.toFixed(0)}, vlayer=${emailNavUSD.toFixed(0)}${aumPendingAdj > 0 ? `, -pending=${aumPendingAdj.toFixed(0)}` : ''}), supply=${supplyTokens.toFixed(2)}`)
+					runtime.log(`Candidate ${supplySource} 1token+fasanara_vlayer: ratio=${ratio.toFixed(4)}, AUM=${totalAUM.toFixed(0)} (1token=${oneTokenOnchainAUMUSD.toFixed(0)}, vlayer=${emailNavUSD.toFixed(0)}${onchainReserveUSD > 0 ? `, +onchainReserve=${onchainReserveUSD.toFixed(0)}` : ''}${aumPendingAdj > 0 ? `, -pending=${aumPendingAdj.toFixed(0)}` : ''}), supply=${supplyTokens.toFixed(2)}`)
 					if (ratio > threshold) { selectedCandidate = { totalAUM, aumSource: '1token+fasanara_vlayer', supplyTokens, supplySource, ratio }; continue }
 				}
 
 				if (!selectedCandidate) {
-					const totalAUM = oneTokenOnchainAUMUSD - aumPendingAdj
+					const totalAUM = oneTokenOnchainAUMUSD + onchainReserveUSD - aumPendingAdj
 					const ratio = computeRatio(totalAUM, supplyTokens)
 					runtime.log(`Candidate ${supplySource} 1token: ratio=${ratio.toFixed(4)}, AUM=${totalAUM.toFixed(0)}${aumPendingAdj > 0 ? ` (1token=${oneTokenOnchainAUMUSD.toFixed(0)} -pending=${aumPendingAdj.toFixed(0)})` : ''}, supply=${supplyTokens.toFixed(2)}`)
 					if (ratio > threshold) { selectedCandidate = { totalAUM, aumSource: '1token', supplyTokens, supplySource, ratio }; continue }

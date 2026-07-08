@@ -243,6 +243,82 @@ export function readOraclePrice(
 }
 
 
+const erc20ABI = [
+	{
+		name: 'balanceOf',
+		type: 'function',
+		stateMutability: 'view',
+		inputs: [{ name: 'account', type: 'address' }],
+		outputs: [{ name: '', type: 'uint256' }],
+	},
+] as const
+
+/**
+ * Read ERC-20 balance of `wallet` in `token` on the given chain.
+ * Returns the raw uint256 as bigint (caller divides by decimals).
+ */
+export function readErc20Balance(
+	runtime: Runtime<Config>,
+	tokenAddress: string,
+	wallet: string,
+	chainSelectorName: string,
+): bigint {
+	const network = getNetworkByChainSelector(chainSelectorName)
+	if (!network) throw new Error(`Network not found: ${chainSelectorName}`)
+
+	const evmClient = new EVMClient(network.chainSelector.selector)
+	const callData = encodeFunctionData({
+		abi: erc20ABI,
+		functionName: 'balanceOf',
+		args: [wallet as `0x${string}`],
+	})
+	const result = evmClient
+		.callContract(runtime, {
+			call: encodeCallMsg({
+				from: zeroAddress,
+				to: tokenAddress as `0x${string}`,
+				data: callData,
+			}),
+			blockNumber: LATEST_BLOCK_NUMBER,
+		})
+		.result()
+	const decoded = decodeFunctionResult({
+		abi: erc20ABI,
+		functionName: 'balanceOf',
+		data: bytesToHex(result.data),
+	}) as bigint
+	return decoded
+}
+
+/**
+ * Read ERC-20 balance of `wallet` in `token`, converted to a decimal amount.
+ * Assumes 18 decimals unless overridden.
+ */
+export function readErc20BalanceDecimal(
+	runtime: Runtime<Config>,
+	tokenAddress: string,
+	wallet: string,
+	chainSelectorName: string,
+	decimals: number = 18,
+): number {
+	const raw = readErc20Balance(runtime, tokenAddress, wallet, chainSelectorName)
+	return Number(raw) / Math.pow(10, decimals)
+}
+
+/**
+ * Read the latestRoundData answer of a Chainlink AggregatorV3 oracle, returning
+ * the price as a decimal number. Convenience wrapper around `readOraclePrice`.
+ */
+export function readOraclePriceDecimal(
+	runtime: Runtime<Config>,
+	oracleAddress: string,
+	chainSelectorName: string,
+	decimals: number = 8,
+): number {
+	const price = readOraclePrice(runtime, oracleAddress, chainSelectorName, decimals)
+	return Number(price.answer) / Math.pow(10, decimals)
+}
+
 /**
  * Extract NAV from a Vlayer fund manager email by summing the configured navFields.
  * Each field in navFields is matched case-insensitively as a substring of a line.
@@ -288,6 +364,47 @@ export function extractNavFromEmail(
 	} catch {
 		return null
 	}
+}
+
+/**
+ * Extract multiple named fields from a Vlayer email, returning a map of
+ * fieldLabel -> parsed number. Any field not found is omitted from the map.
+ * Used by fundInflight and any per-field extraction (as opposed to summed navFields).
+ */
+export function extractFieldsFromEmail(
+	emailClaim: { resolve: (pointer: string) => unknown },
+	fieldLabels: string[],
+): Record<string, number> {
+	const out: Record<string, number> = {}
+	try {
+		const body = emailClaim.resolve(
+			'/response/@parseJson(body)/payload/parts/0/body/@decodeBase64(data)'
+		) as string
+		if (typeof body !== 'string' || fieldLabels.length === 0) return out
+
+		const lines = body.split('\n')
+		const parseAmount = (line: string): number | null => {
+			const match = line.match(/([\d,]+\.?\d*)\s*(?:USD)?[\s]*$/)
+			if (!match) return null
+			const num = parseFloat(match[1].replace(/,/g, ''))
+			return isNaN(num) ? null : num
+		}
+
+		for (const label of fieldLabels) {
+			for (const line of lines) {
+				if (line.trim().toLowerCase().includes(label.toLowerCase())) {
+					const amount = parseAmount(line.trim())
+					if (amount !== null) {
+						out[label] = amount
+						break
+					}
+				}
+			}
+		}
+	} catch {
+		// return whatever was found so far (possibly empty)
+	}
+	return out
 }
 
 const totalSupplyABI = [

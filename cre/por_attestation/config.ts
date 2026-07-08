@@ -42,6 +42,34 @@ const fundManagerConfigSchema = z
 		path: ['requiredReceiverEmail'],
 	})
 
+// Second vlayer-notarized email (optional, parallel to `fundManager`).
+// Purpose: extract non-NAV flow data — pending investments, pending redemptions,
+// tokens locked in redemption process — from a separate custodian email.
+// `fields` maps a semantic key (e.g. "pendingRedemption") to the exact email
+// field label; the workflow reads each value as a USD amount (or token count
+// for keys ending in "Tokens").
+const fundInflightConfigSchema = z
+	.object({
+		expectedEmail: z.string(),
+		requiredReceiverEmail: z.string(),
+		allowedReceiverEmails: z.array(z.string()).default([]),
+		tokenName: z.string(),
+		// Map of semantic field key -> email field label to extract.
+		// Recognized keys (all optional): pendingInvest, pendingRedemption,
+		// liquidityRequestedTokens (interpreted as token count, not USD).
+		fields: z.record(z.string(), z.string()),
+	})
+	.refine((d) => emailRegex.test(d.expectedEmail) || domainRegex.test(d.expectedEmail), {
+		message: 'Invalid sender email',
+		path: ['expectedEmail'],
+	})
+	.refine((d) => emailRegex.test(d.requiredReceiverEmail), {
+		message: 'Invalid required receiver email',
+		path: ['requiredReceiverEmail'],
+	})
+
+export type FundInflightConfig = z.infer<typeof fundInflightConfigSchema>
+
 const oneTokenApiSchema = z.object({
 	tokenName: z.string(),
 	useNavBase: z.boolean().default(false),
@@ -115,6 +143,42 @@ const anchorRuleSchema = z.object({
 
 export type AnchorRule = z.infer<typeof anchorRuleSchema>
 
+const addressSchema = z.string().regex(/^0x[a-fA-F0-9]{40}$/)
+
+// Wallets whose balance of the primary token is subtracted from raw
+// `totalSupply` to obtain the circulating supply used in the ratio check.
+// Typical entries: redemption vault, burn queue, LP with pending-burn tokens.
+// Any wallet listed is queried on-chain (ERC-20 balanceOf) at attestation time.
+const supplyExclusionWalletsSchema = z.array(addressSchema).min(1)
+
+// On-chain reserve additions — wallets holding USDC or other backing assets
+// that are part of the fund's collateral but not surfaced by the fund manager
+// email or 1token equity endpoint (e.g., Fasanara Settlement Funds in Process
+// held in Fordefi vaults). Every wallet listed is queried at attestation time
+// with a batched balanceOf call.
+const reserveOnchainWalletsSchema = z.object({
+	// USDC balances at these wallets are summed and added to the reserve.
+	// Assumes USDC on ethereum-mainnet unless the token entry overrides.
+	usdcWallets: z.array(addressSchema).default([]),
+	// USDC contract address (default: mainnet USDC). Override for other chains.
+	usdcAddress: addressSchema.default('0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'),
+	// Other on-chain tokens (e.g. mTBILL) — each entry is queried with balanceOf
+	// and valued via its Chainlink oracle. `priceDecimals` defaults to 8.
+	otherTokens: z
+		.array(
+			z.object({
+				wallet: addressSchema,
+				token: addressSchema,
+				priceOracle: addressSchema,
+				priceDecimals: z.number().int().nonnegative().default(8),
+				label: z.string().default(''),
+			})
+		)
+		.default([]),
+})
+
+export type ReserveOnchainWallets = z.infer<typeof reserveOnchainWalletsSchema>
+
 const tokenConfigSchema = z.object({
 	name: z.string(),
 	address: z.string().optional(),  // token contract address (used by external supply endpoint)
@@ -124,6 +188,10 @@ const tokenConfigSchema = z.object({
 	// read related to this token contract.
 	chainSelectorName: z.string().default('ethereum-mainnet'),
 	fundManager: fundManagerConfigSchema.optional(),
+	// Second vlayer email (in-flight flows: invest/redeem pending, liquidity
+	// requested). When present, ops includes `vlayerInflightHash` in ops_claim
+	// and the workflow verifies it and extracts the configured fields.
+	fundInflight: fundInflightConfigSchema.optional(),
 	oneTokenApi: oneTokenApiSchema.optional(),
 	supplyToken: supplyTokenSchema.optional(),
 	pendingRedemptionSource: pendingRedemptionSourceSchema.optional(),
@@ -134,6 +202,12 @@ const tokenConfigSchema = z.object({
 	// the pending value from ops's NAV when computing the symmetric deviation against
 	// external (1token) net NAV.
 	opsNavIsNetOfPending: z.boolean().optional(),
+	// Wallets whose primary-token balance is excluded from the raw totalSupply
+	// (redemption vault, burn queue, etc.). See supplyExclusionWalletsSchema.
+	supplyExclusionWallets: supplyExclusionWalletsSchema.optional(),
+	// On-chain USDC + other-token wallets that add to the reserve (Settlement
+	// Funds in Process, mTBILL holdings, etc.). See reserveOnchainWalletsSchema.
+	reserveOnchainWallets: reserveOnchainWalletsSchema.optional(),
 })
 
 export type TokenConfig = z.infer<typeof tokenConfigSchema>
