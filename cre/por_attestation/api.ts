@@ -72,7 +72,16 @@ function verifyClaimWithVlayerInternal(
 	}
 
 	const httpClient = new HTTPClient()
-	const body = stringToBase64(JSON.stringify(proof))
+	// vlayer v2 is strict on the request body: it rejects unknown fields with
+	// INVALID_REQUEST. Some IPFS-stored proofs (legacy v1 captures) carry extra
+	// fields like `success` alongside `data`/`version`/`meta` — strip everything
+	// but the three accepted keys before POSTing.
+	const minimalProof = {
+		data: proof.data,
+		version: proof.version,
+		meta: { notaryUrl: proof.meta?.notaryUrl },
+	}
+	const body = stringToBase64(JSON.stringify(minimalProof))
 
 	const response = httpClient.sendRequest(nodeRuntime, {
 		url: vlayerUrl,
@@ -127,7 +136,7 @@ export async function verifyClaimWithVlayer(
 	runtime: Runtime<Config>,
 	proofData: any,
 ): Promise<VlayerVerificationResult> {
-	const authToken = runtime.getSecret({ id: 'vlayerauthtoken' }).result().value as string
+	const authToken = runtime.getSecret({ id: 'vlayerauthtokenv2' }).result().value as string
 
 	const consensus = runtime.runInNodeMode(
 		(nodeRuntime: NodeRuntime<Config>) => verifyClaimWithVlayerInternal(
@@ -234,6 +243,82 @@ export function readOraclePrice(
 }
 
 
+const erc20ABI = [
+	{
+		name: 'balanceOf',
+		type: 'function',
+		stateMutability: 'view',
+		inputs: [{ name: 'account', type: 'address' }],
+		outputs: [{ name: '', type: 'uint256' }],
+	},
+] as const
+
+/**
+ * Read ERC-20 balance of `wallet` in `token` on the given chain.
+ * Returns the raw uint256 as bigint (caller divides by decimals).
+ */
+export function readErc20Balance(
+	runtime: Runtime<Config>,
+	tokenAddress: string,
+	wallet: string,
+	chainSelectorName: string,
+): bigint {
+	const network = getNetworkByChainSelector(chainSelectorName)
+	if (!network) throw new Error(`Network not found: ${chainSelectorName}`)
+
+	const evmClient = new EVMClient(network.chainSelector.selector)
+	const callData = encodeFunctionData({
+		abi: erc20ABI,
+		functionName: 'balanceOf',
+		args: [wallet as `0x${string}`],
+	})
+	const result = evmClient
+		.callContract(runtime, {
+			call: encodeCallMsg({
+				from: zeroAddress,
+				to: tokenAddress as `0x${string}`,
+				data: callData,
+			}),
+			blockNumber: LATEST_BLOCK_NUMBER,
+		})
+		.result()
+	const decoded = decodeFunctionResult({
+		abi: erc20ABI,
+		functionName: 'balanceOf',
+		data: bytesToHex(result.data),
+	}) as bigint
+	return decoded
+}
+
+/**
+ * Read ERC-20 balance of `wallet` in `token`, converted to a decimal amount.
+ * Assumes 18 decimals unless overridden.
+ */
+export function readErc20BalanceDecimal(
+	runtime: Runtime<Config>,
+	tokenAddress: string,
+	wallet: string,
+	chainSelectorName: string,
+	decimals: number = 18,
+): number {
+	const raw = readErc20Balance(runtime, tokenAddress, wallet, chainSelectorName)
+	return Number(raw) / Math.pow(10, decimals)
+}
+
+/**
+ * Read the latestRoundData answer of a Chainlink AggregatorV3 oracle, returning
+ * the price as a decimal number. Convenience wrapper around `readOraclePrice`.
+ */
+export function readOraclePriceDecimal(
+	runtime: Runtime<Config>,
+	oracleAddress: string,
+	chainSelectorName: string,
+	decimals: number = 8,
+): number {
+	const price = readOraclePrice(runtime, oracleAddress, chainSelectorName, decimals)
+	return Number(price.answer) / Math.pow(10, decimals)
+}
+
 /**
  * Extract NAV from a Vlayer fund manager email by summing the configured navFields.
  * Each field in navFields is matched case-insensitively as a substring of a line.
@@ -279,6 +364,47 @@ export function extractNavFromEmail(
 	} catch {
 		return null
 	}
+}
+
+/**
+ * Extract multiple named fields from a Vlayer email, returning a map of
+ * fieldLabel -> parsed number. Any field not found is omitted from the map.
+ * Used by fundInflight and any per-field extraction (as opposed to summed navFields).
+ */
+export function extractFieldsFromEmail(
+	emailClaim: { resolve: (pointer: string) => unknown },
+	fieldLabels: string[],
+): Record<string, number> {
+	const out: Record<string, number> = {}
+	try {
+		const body = emailClaim.resolve(
+			'/response/@parseJson(body)/payload/parts/0/body/@decodeBase64(data)'
+		) as string
+		if (typeof body !== 'string' || fieldLabels.length === 0) return out
+
+		const lines = body.split('\n')
+		const parseAmount = (line: string): number | null => {
+			const match = line.match(/([\d,]+\.?\d*)\s*(?:USD)?[\s]*$/)
+			if (!match) return null
+			const num = parseFloat(match[1].replace(/,/g, ''))
+			return isNaN(num) ? null : num
+		}
+
+		for (const label of fieldLabels) {
+			for (const line of lines) {
+				if (line.trim().toLowerCase().includes(label.toLowerCase())) {
+					const amount = parseAmount(line.trim())
+					if (amount !== null) {
+						out[label] = amount
+						break
+					}
+				}
+			}
+		}
+	} catch {
+		// return whatever was found so far (possibly empty)
+	}
+	return out
 }
 
 const totalSupplyABI = [
@@ -337,6 +463,11 @@ export interface OneTokenReportData {
 	assets: Record<string, number>
 	liabilities: Record<string, number>
 	equity: Record<string, number>
+	/** equity.total minus the sum of off-chain entries listed in `offchainEquityKeys`
+	 *  (e.g. 1token's `general_wallet` synthetic OTC account). Represents the strictly
+	 *  on-chain valuation in millions USD. Off-chain portion is recovered from the
+	 *  vlayer-notarized fund manager email and added back downstream. */
+	equityOnchain: number
 	navBase?: number
 	/** Pending redemption extracted from nav_by_wallet entries matching the pattern. Unit matches the AUM unit: raw base currency (e.g. BTC) when useNavBase=true, USD otherwise (already converted from millions). Only present if a pattern was provided to fetch. */
 	pendingRedemption?: number
@@ -369,6 +500,7 @@ function fetchOneTokenReportInternal(
 	timestamp: string,
 	pendingPattern?: string,
 	useNavBase: boolean = false,
+	offchainEquityKeys: readonly string[] = [],
 ): OneTokenReportData {
 	const url = `${ONE_TOKEN_API_URL}?token=${tokenName}&timestamp=${timestamp}`
 
@@ -393,7 +525,12 @@ function fetchOneTokenReportInternal(
 
 	const fullResponse = JSON.parse(bodyText)
 	const reports = fullResponse?.reports
-	const report = reports?.assets_and_liabilities_by_protocol
+	// 1token renamed `assets_and_liabilities_by_protocol` → `assets_by_protocol`.
+	// New schema INCLUDES `general_wallet` (the synthetic OTC account for off-chain fund
+	// shares) in `equity.total` — so we now must subtract `equity[offchainEquityKeys]`
+	// to isolate the strictly on-chain portion. Keep the old field name as a fallback
+	// for cached / historical responses.
+	const report = reports?.assets_by_protocol ?? reports?.assets_and_liabilities_by_protocol
 
 	if (!report || typeof report.equity?.total !== 'number') {
 		throw new Error(`1token response missing equity.total. Body: ${bodyText.slice(0, 300)}`)
@@ -402,6 +539,12 @@ function fetchOneTokenReportInternal(
 	// Return only numeric fields to avoid null values crashing the CRE WASM serializer
 	const sanitize = (obj: Record<string, unknown>): Record<string, number> =>
 		Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, typeof v === 'number' ? v : 0]))
+
+	const equity = sanitize(report.equity ?? {})
+	// Subtract off-chain keys (default `general_wallet`) to isolate the on-chain
+	// equity. For mFONE: 72.6M total − 69.6M general_wallet = 3.03M on-chain.
+	const offchainEquity = offchainEquityKeys.reduce((acc, k) => acc + (equity[k] ?? 0), 0)
+	const equityOnchain = (equity.total ?? 0) - offchainEquity
 
 	const navBaseCurrencyTotal = reports?.nav_by_chain?.pv_base?.total
 	const pendingRaw = pendingPattern ? sumNavByWalletPattern(reports, pendingPattern, useNavBase) : undefined
@@ -413,7 +556,8 @@ function fetchOneTokenReportInternal(
 	return {
 		assets: sanitize(report.assets ?? {}),
 		liabilities: sanitize(report.liabilities ?? {}),
-		equity: sanitize(report.equity ?? {}),
+		equity,
+		equityOnchain,
 		...(typeof navBaseCurrencyTotal === 'number' ? { navBase: navBaseCurrencyTotal } : {}),
 		...(typeof pending === 'number' ? { pendingRedemption: pending } : {}),
 	}
@@ -478,9 +622,10 @@ export function fetchSupplyDetails(
 export function fetchOneTokenReport(
 	runtime: Runtime<Config>,
 	timestamp: string,
-	oneTokenApi: { tokenName: string; useNavBase?: boolean },
+	oneTokenApi: { tokenName: string; useNavBase?: boolean; offchainEquityKeys?: readonly string[] },
 	pendingPattern?: string,
 ): OneTokenReportData | null {
+	const offchainEquityKeys = oneTokenApi.offchainEquityKeys ?? []
 	return runtime.runInNodeMode(
 		(nodeRuntime: NodeRuntime<Config>) => fetchOneTokenReportInternal(
 			nodeRuntime,
@@ -488,6 +633,7 @@ export function fetchOneTokenReport(
 			timestamp,
 			pendingPattern,
 			oneTokenApi.useNavBase ?? false,
+			offchainEquityKeys,
 		),
 		consensusIdenticalAggregation<OneTokenReportData>()
 	)().result()

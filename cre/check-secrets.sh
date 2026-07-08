@@ -16,6 +16,7 @@ fi
 # Map: secret name in secrets.yaml -> env var name
 REQUIRED=(
   "vlayerauthtoken=VLAYER_AUTH_TOKEN"
+  "vlayerauthtokenv2=VLAYER_AUTH_TOKEN_V2"
   "pinatajwt=PINATA_JWT"
   "attesterprivatekey=ATTESTER_PRIVATE_KEY"
   "verifierprivatekey=VERIFIER_PRIVATE_KEY"

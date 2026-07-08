@@ -14,8 +14,13 @@ export interface OpsClaimData {
 	createdAt: string
 	priceUpdateTxHash: string
 	priceUpdateChainId: number
-	totalSupplyCrossChainReportedByOps: string // wei as decimal string (18 decimals)
-	navReportedByOps: string                   // collateral value in oracle denomination (USD for stablecoins, BTC for mHyperBTC)
+	totalSupplyCrossChainReportedByOps: string // wei as decimal string (18 decimals) — net of tokens in the burn/redemption pipeline
+	navReportedByOps: string                   // collateral value net of pending payouts (in oracle denomination). Used in the ratio.
+	// Gross reserve in USD, computed by ops as (off-chain portfolio value from fund admin) + (on-chain TVL Midas holds).
+	// Optional — present when ops publishes it. Used only for public display on the Midas frontend;
+	// the overcollateralization ratio keeps using the net `navReportedByOps` (net-vs-net stays
+	// consistent while the burn/redemption pipeline is still in-flight).
+	navReportedByOpsGross?: string
 	tokenPriceReportedByOps: string            // token price in oracle denomination
 	oracleAddress: string                      // Chainlink price feed address
 	oracleChainSelectorName: string            // e.g. "ethereum-mainnet"
@@ -92,23 +97,32 @@ export function createInternalOvercollateralizationClaim(
 	const oraclePriceUSD = Number(oraclePriceData.answer) / Math.pow(10, oraclePriceData.decimals)
 	const ratio = oraclePriceUSD > 0 ? navPerToken / oraclePriceUSD : 0
 
+	const data: Record<string, unknown> = {
+		overcollateralizationType: 'method-2',
+		// ─── frontend display (gross) ───
+		// ─── ratio math (net) ───
+		totalReserveNetUSD: navUsed.toFixed(2),
+		supplyTokensNet: totalSupplyTokens.toFixed(6),
+		// ─── legacy fields (kept for backward compatibility with existing verifiers) ───
+		totalReserveUSD: navUsed.toFixed(2),          // alias of totalReserveNetUSD
+		supplyTokens: totalSupplyTokens.toFixed(6),    // alias of supplyTokensNet
+		navReportedByOps: opsClaimData.navReportedByOps,
+		totalSupplyCrossChainReportedByOps: opsClaimData.totalSupplyCrossChainReportedByOps,
+		totalSupplyTokens: totalSupplyTokens.toFixed(6),
+		navPerToken: navPerToken.toFixed(6),
+		oraclePriceFormatted: oraclePriceUSD.toFixed(9),
+		threshold,
+		ratio: parseFloat(ratio.toFixed(6)),
+		passed: ratio > threshold,
+	}
+	if (opsClaimData.navReportedByOpsGross != null) {
+		data.totalReserveGrossUSD = opsClaimData.navReportedByOpsGross
+	}
 	return new ObjectClaim({
 		id: 'overcollateralization',
 		format: 'json',
-		data: {
-			overcollateralizationType: 'method-2',
-			aumSource: 'ops_claim',
-			supplySource: 'ops_claim',
-			navReportedByOps: opsClaimData.navReportedByOps,
-			totalSupplyCrossChainReportedByOps: opsClaimData.totalSupplyCrossChainReportedByOps,
-			totalSupplyTokens: totalSupplyTokens.toFixed(6),
-			navPerToken: navPerToken.toFixed(6),
-			oraclePriceFormatted: oraclePriceUSD.toFixed(9),
-			threshold,
-			ratio: parseFloat(ratio.toFixed(6)),
-			passed: ratio > threshold,
-		},
-		description: 'Overcollateralization check using ops NAV data (internal fallback)',
+		data,
+		description: 'Overcollateralization verification',
 		proof: CRE_CONSENSUS_PROOF,
 	})
 }
@@ -128,6 +142,8 @@ export function createExternalOvercollateralizationClaim(
 	pendingRedemptionUSD: number,
 	oneTokenOnchainAUM: number | null,
 	emailNavUSD: number | null,
+	onchainReserveUSD: number = 0,
+	supplyExclusionsOnchainTokens: number = 0,
 ): ObjectClaim {
 	const navPerToken = supplyTokens > 0 ? totalAUM / supplyTokens : 0
 	const oraclePriceUSD = Number(oraclePriceData.answer) / Math.pow(10, oraclePriceData.decimals)
@@ -136,11 +152,16 @@ export function createExternalOvercollateralizationClaim(
 	const totalSupplyTokens = Number(BigInt(opsClaimData.totalSupplyCrossChainReportedByOps)) / 1e18
 	const data: Record<string, unknown> = {
 		overcollateralizationType: 'method-1',
-		aumSource,
-		supplySource,
-		oneTokenAUM: totalAUM.toFixed(2),
+		// ─── frontend display (gross) ───
+		totalReserveGrossUSD: (totalAUM + pendingRedemptionUSD).toFixed(2),
+		// ─── ratio math (net) ───
+		totalReserveNetUSD: totalAUM.toFixed(2),
+		supplyTokensNet: supplyTokens.toFixed(6),
+		// ─── legacy fields (kept for backward compatibility) ───
+		totalReserveUSD: totalAUM.toFixed(2),         // alias of totalReserveNetUSD
+		supplyTokens: supplyTokens.toFixed(6),         // alias of supplyTokensNet
+		oneTokenAUM: totalAUM.toFixed(2),              // alias of totalReserveNetUSD
 		pendingRedemptionUSD: pendingRedemptionUSD.toFixed(2),
-		supplyTokens: supplyTokens.toFixed(6),
 		totalSupplyCrossChainReportedByOps: opsClaimData.totalSupplyCrossChainReportedByOps,
 		totalSupplyTokens: totalSupplyTokens.toFixed(6),
 		navPerToken: navPerToken.toFixed(6),
@@ -149,14 +170,23 @@ export function createExternalOvercollateralizationClaim(
 		ratio: parseFloat(ratio.toFixed(6)),
 		passed: ratio > threshold,
 	}
+	// Breakdown of the total reserve so the frontend / auditor can inspect each source separately.
 	if (oneTokenOnchainAUM !== null) data.oneTokenOnchainAUM = oneTokenOnchainAUM.toFixed(2)
 	if (emailNavUSD !== null && emailNavUSD > 0) data.fundManagerNavUSD = emailNavUSD.toFixed(2)
+
+	// On-chain reserve total — USDC + other-token balances queried live via
+	// balanceOf() at attestation time. Auditable via on-chain state at the
+	// attestation block.
+	if (onchainReserveUSD > 0) data.onchainReserveWalletsUSD = onchainReserveUSD.toFixed(2)
+	// Supply exclusion total — sum of primary-token balances subtracted from
+	// raw totalSupply (non-circulating vaults / LP with pending burn).
+	if (supplyExclusionsOnchainTokens > 0) data.supplyExclusionsOnchainTokens = supplyExclusionsOnchainTokens.toFixed(6)
 
 	return new ObjectClaim({
 		id: 'overcollateralization',
 		format: 'json',
 		data,
-		description: 'Overcollateralization check using external AUM data',
+		description: 'Overcollateralization verification',
 		proof: CRE_CONSENSUS_PROOF,
 	})
 }
@@ -188,10 +218,15 @@ export function createFundManagerEmailClaim(
 		notaryKeyFingerprint: vlayerVerificationResult.notaryKeyFingerprint,
 	})
 
+	// vlayer v2's /verify endpoint no longer returns `success` inside its `data` field
+	// (it's only at the wire level). Storing it here made verifiers see a phantom
+	// `success:true` in expectedData that's not in the re-verified result → canonical
+	// mismatch. Strip it before storing.
+	const { success: _drop, ...claimData } = vlayerVerificationResult
 	return new ObjectClaim({
 		id: 'fund_manager_claim',
 		format: 'json',
-		data: vlayerVerificationResult as unknown as Record<string, unknown>,
+		data: claimData as unknown as Record<string, unknown>,
 		description: 'Total NAV reported by fund manager (Vlayer TLS verified)',
 		proof: tlsNotaryProof,
 	})

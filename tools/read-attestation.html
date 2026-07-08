@@ -288,7 +288,7 @@ function renderClaimData(c) {
 			add('type', d.overcollateralizationType)
 			add('aumSource', d.aumSource)
 			add('supplySource', d.supplySource)
-			add('AUM', d.oneTokenAUM ?? '-')
+			add('Total reserve (USD)', d.totalReserveUSD ?? d.oneTokenAUM ?? '-', 'ok')
 			add('supplyTokens', d.supplyTokens ?? d.totalSupplyTokens)
 			add('navPerToken', d.navPerToken)
 			add('oraclePrice', d.oraclePriceFormatted)
