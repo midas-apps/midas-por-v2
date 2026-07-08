@@ -99,11 +99,7 @@ export function createInternalOvercollateralizationClaim(
 
 	const data: Record<string, unknown> = {
 		overcollateralizationType: 'method-2',
-		aumSource: 'ops_claim',
-		supplySource: 'ops_claim',
 		// ─── frontend display (gross) ───
-		// Comes from ops when they publish `navReportedByOpsGross` (their own calc: off-chain
-		// portfolio + on-chain TVL). Optional — present only when supplied.
 		// ─── ratio math (net) ───
 		totalReserveNetUSD: navUsed.toFixed(2),
 		supplyTokensNet: totalSupplyTokens.toFixed(6),
@@ -126,7 +122,7 @@ export function createInternalOvercollateralizationClaim(
 		id: 'overcollateralization',
 		format: 'json',
 		data,
-		description: 'Overcollateralization check using ops NAV data (method-2 fallback). Frontend reads totalReserveGrossUSD (from ops) for display; ratio uses totalReserveNetUSD / supplyTokensNet.',
+		description: 'Overcollateralization verification',
 		proof: CRE_CONSENSUS_PROOF,
 	})
 }
@@ -156,11 +152,7 @@ export function createExternalOvercollateralizationClaim(
 	const totalSupplyTokens = Number(BigInt(opsClaimData.totalSupplyCrossChainReportedByOps)) / 1e18
 	const data: Record<string, unknown> = {
 		overcollateralizationType: 'method-1',
-		aumSource,
-		supplySource,
 		// ─── frontend display (gross) ───
-		// Reserve gross of pending payouts = 1token + vlayer email (no pending subtraction).
-		// Equivalent to totalReserveNetUSD + pendingRedemptionUSD.
 		totalReserveGrossUSD: (totalAUM + pendingRedemptionUSD).toFixed(2),
 		// ─── ratio math (net) ───
 		totalReserveNetUSD: totalAUM.toFixed(2),
@@ -194,7 +186,7 @@ export function createExternalOvercollateralizationClaim(
 		id: 'overcollateralization',
 		format: 'json',
 		data,
-		description: 'Overcollateralization check using external AUM data',
+		description: 'Overcollateralization verification',
 		proof: CRE_CONSENSUS_PROOF,
 	})
 }
