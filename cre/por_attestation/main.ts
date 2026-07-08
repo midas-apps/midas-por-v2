@@ -610,6 +610,7 @@ const runWorkflow = async (
 		//     pattern was expected from it)
 
 		let method1SupplyTokens: number | null = null
+		let supplyExclusionsOnchainTokens = 0
 
 		const requiresOneTokenForPending = prs?.oneTokenWalletPattern != null
 		const oneTokenAvailable = oneTokenRawReport !== null
@@ -628,21 +629,21 @@ const runWorkflow = async (
 				// Supply exclusions: subtract on-chain balances of the primary token in
 				// configured non-circulating wallets (redemption vault, burn queue, LP
 				// waiting-to-burn). Each failed balanceOf is treated as 0 (skipped).
-				let onchainExclusions = 0
 				if (tokenConfig.supplyExclusionWallets && tokenConfig.supplyExclusionWallets.length > 0 && tokenConfig.address) {
 					for (const wallet of tokenConfig.supplyExclusionWallets) {
 						try {
 							const bal = readErc20BalanceDecimal(runtime, tokenConfig.address, wallet, tokenConfig.chainSelectorName, 18)
-							onchainExclusions += bal
+							supplyExclusionsOnchainTokens += bal
 							runtime.log(`Supply exclusion ${wallet.slice(0, 10)}...: ${bal.toFixed(2)} tokens`)
 						} catch (e) {
 							runtime.log(`WARN: supply exclusion balanceOf failed for ${wallet}: ${e instanceof Error ? e.message : String(e)}`)
 						}
 					}
-					if (onchainExclusions > 0) {
-						runtime.log(`Supply exclusions total: ${onchainExclusions.toFixed(2)} tokens`)
+					if (supplyExclusionsOnchainTokens > 0) {
+						runtime.log(`Supply exclusions total: ${supplyExclusionsOnchainTokens.toFixed(2)} tokens`)
 					}
 				}
+				const onchainExclusions = supplyExclusionsOnchainTokens
 
 				const pendingTokens = pendingRedemptionUSD / oraclePriceUSD
 				const effectiveSupply = midasSupply.supply - pendingTokens - onchainExclusions
@@ -748,6 +749,8 @@ const runWorkflow = async (
 				pendingRedemptionUSD,
 				oneTokenOnchainAUMUSD,
 				emailNavUSD,
+				onchainReserveUSD,
+				supplyExclusionsOnchainTokens,
 			)
 
 		// 8. Build and sign attestation

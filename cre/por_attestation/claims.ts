@@ -146,6 +146,8 @@ export function createExternalOvercollateralizationClaim(
 	pendingRedemptionUSD: number,
 	oneTokenOnchainAUM: number | null,
 	emailNavUSD: number | null,
+	onchainReserveUSD: number = 0,
+	supplyExclusionsOnchainTokens: number = 0,
 ): ObjectClaim {
 	const navPerToken = supplyTokens > 0 ? totalAUM / supplyTokens : 0
 	const oraclePriceUSD = Number(oraclePriceData.answer) / Math.pow(10, oraclePriceData.decimals)
@@ -179,6 +181,14 @@ export function createExternalOvercollateralizationClaim(
 	// Breakdown of the total reserve so the frontend / auditor can inspect each source separately.
 	if (oneTokenOnchainAUM !== null) data.oneTokenOnchainAUM = oneTokenOnchainAUM.toFixed(2)
 	if (emailNavUSD !== null && emailNavUSD > 0) data.fundManagerNavUSD = emailNavUSD.toFixed(2)
+
+	// On-chain reserve total — USDC + other-token balances queried live via
+	// balanceOf() at attestation time. Auditable via on-chain state at the
+	// attestation block.
+	if (onchainReserveUSD > 0) data.onchainReserveWalletsUSD = onchainReserveUSD.toFixed(2)
+	// Supply exclusion total — sum of primary-token balances subtracted from
+	// raw totalSupply (non-circulating vaults / LP with pending burn).
+	if (supplyExclusionsOnchainTokens > 0) data.supplyExclusionsOnchainTokens = supplyExclusionsOnchainTokens.toFixed(6)
 
 	return new ObjectClaim({
 		id: 'overcollateralization',
