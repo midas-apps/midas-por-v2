@@ -69,12 +69,12 @@ passed =  ratio > threshold        (default threshold = 0.995)
 
 Per-token composition (external check when data is available):
 
-- **mFONE** - Reserve = `1token_equity_total + vlayer_email_nav + Σ USDC(reserveOnchainWallets.usdcWallets)`; Supply = `midas_endpoint_supply − pending_tokens_from_email − Σ balanceOf(supplyExclusionWallets)`
-- **mGLOBAL, mGLO** - Reserve = `1token_equity_total + vlayer_email_nav`; Supply = `midas_endpoint_supply − pending_tokens`
-- **mM1-USD** - Reserve = `vlayer_email_nav` (navIsTotal=true → 1token used as cross-check only); Supply = `midas_endpoint_supply − pending_tokens`
-- **mWIN** - Reserve = `1token_equity_total + vlayer_email_nav` (Northern Trust email); Supply = `midas_endpoint_supply − pending_tokens`
-- **mHyperBTC** - Reserve = `1token_navBase × oraclePriceUSD`; Supply = `midas_endpoint_supply − pending_tokens`
-- **mHYPER, mTBILL** - Reserve = `1token_equity_total × 1e6`; Supply = `midas_endpoint_supply − pending_tokens`
+- **mFONE** - Reserve = `1token_equity_total + vlayer_email_nav + Σ USDC(reserveOnchainWallets.usdcWallets)`; Supply = `midas_endpoint_supply − pending_tokens_from_email − Σ balanceOf(supplyExclusionWallets)`. `vlayer_email_nav = Total Notional Amount + Net Accrued Interest`.
+- **mGLOBAL, mGLO** - Reserve = `1token_equity_total + vlayer_email_nav`; Supply = `midas_endpoint_supply − pending_tokens`. `vlayer_email_nav = Fund Value + Pending Subscription` (Pending Subscription tokens are already minted; cash-in-transit is counted as a receivable to keep the ratio consistent with circulating supply). `pending_tokens` is derived from `Pending Redemption`.
+- **mM1-USD** - Reserve = `vlayer_email_nav` (navIsTotal=true → 1token used as cross-check only); Supply = `midas_endpoint_supply − pending_tokens`.
+- **mWIN** - Reserve = `1token_equity_total + vlayer_email_nav` (Northern Trust email); Supply = `midas_endpoint_supply − pending_tokens`.
+- **mHyperBTC** - Reserve = `1token_navBase × oraclePriceUSD`; Supply = `midas_endpoint_supply − pending_tokens`.
+- **mHYPER, mTBILL** - Reserve = `1token_equity_total × 1e6`; Supply = `midas_endpoint_supply − pending_tokens`.
 
 Where `pending_tokens = pendingRedemptionUSD / oraclePriceUSD` and `pendingRedemptionUSD` is the sum of the `pendingRedemptionSource` (1token wallet pattern + vlayer email fields).
 
@@ -281,8 +281,8 @@ Use [`./check-secrets.sh .env.dev`](./cre/check-secrets.sh) to validate all requ
 Each workflow has a JSON config file per environment. Key fields:
 
 - `attester.publicKey` / `verifier.publicKey` - full ECDSA public key (65 bytes, `0x04...`) of the signing wallet
-- `tokenRegistry` - URL of the public token registry JSON (recommended)
-- `tokens` - inline token map (fallback / override)
+- `tokenRegistry` - URL of the public token registry JSON (source of truth)
+- `tokens` - inline token map (fallback only, used when the registry fetch fails)
 
 ### Token registry (dynamic, no re-deploy)
 
@@ -295,7 +295,9 @@ Tokens are defined in [`tokens.json`](./tokens.json) at the repo root. The workf
 }
 ```
 
-**To add a new token**: open a PR updating `tokens.json`. Once merged on `main`, the next workflow run picks it up. **No re-deploy needed, `workflow_hash` stays stable.**
+**Merge precedence**: the registry is the source of truth. When both are set, values fetched from the registry override the inline `tokens` map for the same `proofId`. Inline entries are only used for tokens the registry doesn't return (or if the fetch fails entirely).
+
+**To add a new token or change any per-token field** (navFields, wallets, redemption source, anchor…): open a PR updating `tokens.json`. Once merged on `main`, the next workflow run picks it up. **No re-deploy needed, `workflow_hash` stays stable.**
 
 Branch protection + required PR reviews on `tokens.json` provides multi-sig-like governance for the registry.
 
