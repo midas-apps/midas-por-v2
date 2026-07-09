@@ -115,17 +115,20 @@ function resolveTokens(runtime: Runtime<Config>): Record<string, TokenVerificati
 			consensusIdenticalAggregation<ReturnType<typeof fetchTokenRegistry>>() as any
 		)().result()
 
+		// Registry is the source of truth. Inline is only a fallback used for tokens
+		// the registry doesn't return — so pushing to tokens.json takes effect at the
+		// next run without redeploying the workflow.
 		const merged: Record<string, TokenVerificationConfig> = {}
+		for (const [proofId, cfg] of Object.entries(inline)) {
+			merged[proofId.toLowerCase()] = cfg
+		}
 		for (const [proofId, cfg] of Object.entries(fetched.tokens)) {
 			const c = cfg as { name?: string }
 			if (c && typeof c.name === 'string') {
 				merged[proofId.toLowerCase()] = { name: c.name }
 			}
 		}
-		for (const [proofId, cfg] of Object.entries(inline)) {
-			merged[proofId.toLowerCase()] = cfg
-		}
-		runtime.log(`Token registry: ${Object.keys(merged).length} tokens (remote: ${Object.keys(fetched.tokens).length}, inline overrides: ${Object.keys(inline).length})`)
+		runtime.log(`Token registry: ${Object.keys(merged).length} tokens (remote: ${Object.keys(fetched.tokens).length}, inline fallbacks: ${Object.keys(inline).length})`)
 		return merged
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err)
