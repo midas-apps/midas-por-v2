@@ -14,8 +14,8 @@
     "@noble/hashes": "1.6.1",
     "@save/core": "workspace:*",
     "pako": "2.1.0",
-    "viem": "2.50.3",
-    "zod": "3.25.76"
+    "viem": "2.54.0",
+    "zod": "4.4.0"
   },
   "devDependencies": {
     "@types/pako": "2.0.3",
