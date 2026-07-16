@@ -483,7 +483,7 @@ const runWorkflow = async (
 						oneTokenTimestamp = ts
 
 						const useNavBase = tokenConfig.oneTokenApi.useNavBase && typeof report.navBase === 'number'
-						oneTokenOnchainAUM = useNavBase ? report.navBase! : report.equity.total * 1_000_000
+						oneTokenOnchainAUM = useNavBase ? report.navBase! : report.equityOnchain * 1_000_000
 						runtime.log(`1token AUM: ${oneTokenOnchainAUM.toFixed(0)} USD (ts=${ts})`)
 						break
 					}
