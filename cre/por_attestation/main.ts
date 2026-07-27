@@ -629,6 +629,21 @@ const runWorkflow = async (
 			if (midasSupply) {
 				runtime.log(`Method-1 external supply: ${midasSupply.supply.toFixed(2)} tokens (${Object.keys(midasSupply.supplyByChain).length} chains)`)
 
+				// Safety: guard against ops mis-report where the ops-declared supply
+				// diverges wildly from the on-chain aggregated supply. Blocks the
+				// attestation if ops < 50% or > 200% of on-chain. Adjust bounds if a
+				// legitimate use-case requires a wider spread.
+				if (midasSupply.supply > 0 && totalSupplyTokens > 0) {
+					const supplyRatio = totalSupplyTokens / midasSupply.supply
+					if (supplyRatio < 0.5 || supplyRatio > 2.0) {
+						throw new Error(
+							`Ops supply diverges from on-chain by ${((supplyRatio - 1) * 100).toFixed(1)}% ` +
+							`(ops=${totalSupplyTokens.toFixed(2)}, onchain=${midasSupply.supply.toFixed(2)}). ` +
+							`Bounds: [0.5×, 2.0×] of on-chain. Attestation will not be pushed.`
+						)
+					}
+				}
+
 				// Supply exclusions: subtract on-chain balances of the primary token in
 				// configured non-circulating wallets (redemption vault, burn queue, LP
 				// waiting-to-burn). Each failed balanceOf is treated as 0 (skipped).
@@ -720,6 +735,19 @@ const runWorkflow = async (
 			throw new Error(
 				`Overcollateralization check failed for ${tokenConfig.name}. ` +
 				`All candidates below threshold=${threshold}. ` +
+				`Attestation will not be pushed.`
+			)
+		}
+
+		// Safety: guard against unrealistic over-collat. Ratio >2 typically means
+		// double-counting (offchain nav in 1token added to vlayer email nav), stale
+		// data, or ops mis-report on supply. Blocks the attestation instead of
+		// publishing implausibly high collateralization.
+		if (selectedCandidate.ratio > 2.0) {
+			throw new Error(
+				`Overcollateralization ratio ${selectedCandidate.ratio.toFixed(4)} exceeds 2.0× for ${tokenConfig.name}. ` +
+				`Likely double-count or ops error (AUM=${selectedCandidate.totalAUM.toFixed(0)}, ` +
+				`supply=${selectedCandidate.supplyTokens.toFixed(2)}, source=${selectedCandidate.aumSource}). ` +
 				`Attestation will not be pushed.`
 			)
 		}
