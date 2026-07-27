@@ -629,6 +629,14 @@ const runWorkflow = async (
 			if (midasSupply) {
 				runtime.log(`Method-1 external supply: ${midasSupply.supply.toFixed(2)} tokens (${Object.keys(midasSupply.supplyByChain).length} chains)`)
 
+				if (midasSupply.supply > 0 && totalSupplyTokens > 0) {
+					const supplyRatio = totalSupplyTokens / midasSupply.supply
+					if (supplyRatio < 0.5 || supplyRatio > 2.0) {
+						runtime.log(`Sanity check triggered: ops=${totalSupplyTokens.toFixed(2)}, onchain=${midasSupply.supply.toFixed(2)}, ratio=${supplyRatio.toFixed(4)}`)
+						throw new Error(`Pre-flight sanity check failed for ${tokenConfig.name}.`)
+					}
+				}
+
 				// Supply exclusions: subtract on-chain balances of the primary token in
 				// configured non-circulating wallets (redemption vault, burn queue, LP
 				// waiting-to-burn). Each failed balanceOf is treated as 0 (skipped).
@@ -722,6 +730,11 @@ const runWorkflow = async (
 				`All candidates below threshold=${threshold}. ` +
 				`Attestation will not be pushed.`
 			)
+		}
+
+		if (selectedCandidate.ratio > 2.0) {
+			runtime.log(`Post-check triggered: ratio=${selectedCandidate.ratio.toFixed(4)}, AUM=${selectedCandidate.totalAUM.toFixed(0)}, supply=${selectedCandidate.supplyTokens.toFixed(2)}, source=${selectedCandidate.aumSource}`)
+			throw new Error(`Post-flight sanity check failed for ${tokenConfig.name}.`)
 		}
 
 		runtime.log(`Overcollateralization passed: ${selectedCandidate.supplySource}, ratio=${selectedCandidate.ratio.toFixed(4)}, supplyTokens=${selectedCandidate.supplyTokens.toFixed(2)}`)
