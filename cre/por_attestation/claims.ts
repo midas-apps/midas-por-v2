@@ -150,16 +150,18 @@ export function createExternalOvercollateralizationClaim(
 	const ratio = oraclePriceUSD > 0 ? navPerToken / oraclePriceUSD : 0
 
 	const totalSupplyTokens = Number(BigInt(opsClaimData.totalSupplyCrossChainReportedByOps)) / 1e18
+	const pendingTokens = oraclePriceUSD > 0 ? pendingRedemptionUSD / oraclePriceUSD : 0
+	const supplyTokensGross = supplyTokens + supplyExclusionsOnchainTokens + pendingTokens
 	const data: Record<string, unknown> = {
 		overcollateralizationType: 'method-1',
 		// ─── frontend display (gross) ───
 		totalReserveGrossUSD: (totalAUM + pendingRedemptionUSD).toFixed(2),
+		supplyTokens: supplyTokensGross.toFixed(6),    // raw on-chain totalSupply (matches ERC20 totalSupply(), for TVL display)
 		// ─── ratio math (net) ───
 		totalReserveNetUSD: totalAUM.toFixed(2),
-		supplyTokensNet: supplyTokens.toFixed(6),
+		supplyTokensNet: supplyTokens.toFixed(6),      // effective supply after LP exclusions + pending (used in ratio)
 		// ─── legacy fields (kept for backward compatibility) ───
-		totalReserveUSD: totalAUM.toFixed(2),         // alias of totalReserveNetUSD
-		supplyTokens: supplyTokens.toFixed(6),         // alias of supplyTokensNet
+		totalReserveUSD: totalAUM.toFixed(2),          // alias of totalReserveNetUSD
 		oneTokenAUM: totalAUM.toFixed(2),              // alias of totalReserveNetUSD
 		pendingRedemptionUSD: pendingRedemptionUSD.toFixed(2),
 		totalSupplyCrossChainReportedByOps: opsClaimData.totalSupplyCrossChainReportedByOps,
