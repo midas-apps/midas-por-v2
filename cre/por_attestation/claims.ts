@@ -82,113 +82,74 @@ export function createOraclePriceNumericClaim(): NumericClaim {
 }
 
 /**
- * Create overcollateralization claim using backoffice NAV data (internal fallback).
- * Supply is from the ops claim (placeholder until Midas supply explorer API is available).
- * Formula: navUsed / totalSupplyTokens / oraclePriceUSD > threshold
+ * Create the overcollateralization claim — GROSS reserve ≥ TVL, USD-denominated.
+ *
+ * All inputs are already USD-converted by the caller: `oraclePriceUSD` includes the
+ * `oracleQuoteFeed` conversion for non-USD oracles (mHyperBTC/BTC, mGLOeuro/EUR), and
+ * `grossReserveUSD` is the selected reserve. The claim is self-consistent:
+ *   ratio = navPerToken / oraclePriceUSD = grossReserveUSD / (grossSupplyTokens × oraclePriceUSD)
+ * Verifiers read `overcollateralization#/ratio` (unchanged) → proof-compatible, no verifier change.
+ *
+ * `overcollateralizationType` and the per-source breakdown fields are consumed by the Midas
+ * frontend site to display the reserve composition — do NOT rename or drop them. (The reserve
+ * path is inferable from these; that is accepted for a transparent PoR display.)
  */
-export function createInternalOvercollateralizationClaim(
-	opsClaimData: OpsClaimData,
-	oraclePriceData: OraclePriceData,
-	threshold: number,
-): ObjectClaim {
-	const navUsed = parseFloat(opsClaimData.navReportedByOps)
-	const totalSupplyTokens = Number(BigInt(opsClaimData.totalSupplyCrossChainReportedByOps)) / 1e18
-	const navPerToken = totalSupplyTokens > 0 ? navUsed / totalSupplyTokens : 0
-	const oraclePriceUSD = Number(oraclePriceData.answer) / Math.pow(10, oraclePriceData.decimals)
-	const ratio = oraclePriceUSD > 0 ? navPerToken / oraclePriceUSD : 0
+export function createOvercollateralizationClaim(args: {
+	grossReserveUSD: number
+	grossSupplyTokens: number
+	oraclePriceUSD: number
+	tvlUSD: number
+	ratio: number
+	threshold: number
+	aumSource: string
+	opsClaimData: OpsClaimData
+	oracleRawPrice: number
+	quoteRate: number
+	emailNavUSD: number | null
+	oneTokenOnchainAUMUSD: number | null
+	onchainReserveUSD: number
+}): ObjectClaim {
+	const navPerToken = args.grossSupplyTokens > 0 ? args.grossReserveUSD / args.grossSupplyTokens : 0
 
 	const data: Record<string, unknown> = {
-		overcollateralizationType: 'method-2',
-		// ─── frontend display (gross) ───
-		// ─── ratio math (net) ───
-		totalReserveNetUSD: navUsed.toFixed(2),
-		supplyTokensNet: totalSupplyTokens.toFixed(6),
-		// ─── legacy fields (kept for backward compatibility with existing verifiers) ───
-		totalReserveUSD: navUsed.toFixed(2),          // alias of totalReserveNetUSD
-		supplyTokens: totalSupplyTokens.toFixed(6),    // alias of supplyTokensNet
-		navReportedByOps: opsClaimData.navReportedByOps,
-		totalSupplyCrossChainReportedByOps: opsClaimData.totalSupplyCrossChainReportedByOps,
-		totalSupplyTokens: totalSupplyTokens.toFixed(6),
+		overcollateralizationType: args.aumSource,
+		// ─── ratio math (gross, USD) ───
+		totalReserveGrossUSD: args.grossReserveUSD.toFixed(2),
+		supplyTokens: args.grossSupplyTokens.toFixed(6),
+		tvlUSD: args.tvlUSD.toFixed(2),
+		oraclePriceUSD: args.oraclePriceUSD.toFixed(9),
+		oraclePriceFormatted: args.oraclePriceUSD.toFixed(9),   // alias (frontend/verifier)
 		navPerToken: navPerToken.toFixed(6),
-		oraclePriceFormatted: oraclePriceUSD.toFixed(9),
-		threshold,
-		ratio: parseFloat(ratio.toFixed(6)),
-		passed: ratio > threshold,
+		threshold: args.threshold,
+		ratio: parseFloat(args.ratio.toFixed(6)),
+		passed: args.ratio > args.threshold,
+		// ─── legacy aliases (backward compatibility with existing frontend/verifiers) ───
+		// Gross model: net == gross (no pending subtraction), so net aliases mirror the gross values.
+		totalReserveUSD: args.grossReserveUSD.toFixed(2),
+		totalReserveNetUSD: args.grossReserveUSD.toFixed(2),
+		supplyTokensNet: args.grossSupplyTokens.toFixed(6),
+		totalSupplyTokens: args.grossSupplyTokens.toFixed(6),
+		totalSupplyCrossChainReportedByOps: args.opsClaimData.totalSupplyCrossChainReportedByOps,
+		navReportedByOps: args.opsClaimData.navReportedByOps,
 	}
-	if (opsClaimData.navReportedByOpsGross != null) {
-		data.totalReserveGrossUSD = opsClaimData.navReportedByOpsGross
+
+	// Non-USD oracle: expose the raw oracle price + quote-feed rate (currency conversion, not a
+	// reserve source) so the USD figures stay auditable for BTC/EUR-denominated tokens.
+	if (args.quoteRate !== 1) {
+		data.oracleRawPrice = args.oracleRawPrice.toFixed(9)
+		data.oracleQuoteRate = args.quoteRate.toFixed(9)
 	}
-	return new ObjectClaim({
-		id: 'overcollateralization',
-		format: 'json',
-		data,
-		description: 'Overcollateralization verification',
-		proof: CRE_CONSENSUS_PROOF,
-	})
-}
-
-/**
- * Create overcollateralization claim using external AUM data.
- * totalAUM and aumSource are pre-computed by the caller.
- */
-export function createExternalOvercollateralizationClaim(
-	totalAUM: number,
-	aumSource: string,
-	opsClaimData: OpsClaimData,
-	oraclePriceData: OraclePriceData,
-	threshold: number,
-	supplyTokens: number,
-	supplySource: 'method-1' | 'method-2',
-	pendingRedemptionUSD: number,
-	oneTokenOnchainAUM: number | null,
-	emailNavUSD: number | null,
-	onchainReserveUSD: number = 0,
-	supplyExclusionsOnchainTokens: number = 0,
-): ObjectClaim {
-	const navPerToken = supplyTokens > 0 ? totalAUM / supplyTokens : 0
-	const oraclePriceUSD = Number(oraclePriceData.answer) / Math.pow(10, oraclePriceData.decimals)
-	const ratio = oraclePriceUSD > 0 ? navPerToken / oraclePriceUSD : 0
-
-	const totalSupplyTokens = Number(BigInt(opsClaimData.totalSupplyCrossChainReportedByOps)) / 1e18
-	const pendingTokens = oraclePriceUSD > 0 ? pendingRedemptionUSD / oraclePriceUSD : 0
-	const supplyTokensGross = supplyTokens + supplyExclusionsOnchainTokens + pendingTokens
-	const data: Record<string, unknown> = {
-		overcollateralizationType: 'method-1',
-		// ─── frontend display (gross) ───
-		totalReserveGrossUSD: (totalAUM + pendingRedemptionUSD).toFixed(2),
-		supplyTokens: supplyTokensGross.toFixed(6),    // raw on-chain totalSupply (matches ERC20 totalSupply(), for TVL display)
-		// ─── ratio math (net) ───
-		totalReserveNetUSD: totalAUM.toFixed(2),
-		supplyTokensNet: supplyTokens.toFixed(6),      // effective supply after LP exclusions + pending (used in ratio)
-		// ─── legacy fields (kept for backward compatibility) ───
-		totalReserveUSD: totalAUM.toFixed(2),          // alias of totalReserveNetUSD
-		oneTokenAUM: totalAUM.toFixed(2),              // alias of totalReserveNetUSD
-		pendingRedemptionUSD: pendingRedemptionUSD.toFixed(2),
-		totalSupplyCrossChainReportedByOps: opsClaimData.totalSupplyCrossChainReportedByOps,
-		totalSupplyTokens: totalSupplyTokens.toFixed(6),
-		navPerToken: navPerToken.toFixed(6),
-		oraclePriceFormatted: oraclePriceUSD.toFixed(9),
-		threshold,
-		ratio: parseFloat(ratio.toFixed(6)),
-		passed: ratio > threshold,
-	}
-	// Breakdown of the total reserve so the frontend / auditor can inspect each source separately.
-	if (oneTokenOnchainAUM !== null) data.oneTokenOnchainAUM = oneTokenOnchainAUM.toFixed(2)
-	if (emailNavUSD !== null && emailNavUSD > 0) data.fundManagerNavUSD = emailNavUSD.toFixed(2)
-
-	// On-chain reserve total — USDC + other-token balances queried live via
-	// balanceOf() at attestation time. Auditable via on-chain state at the
-	// attestation block.
-	if (onchainReserveUSD > 0) data.onchainReserveWalletsUSD = onchainReserveUSD.toFixed(2)
-	// Supply exclusion total — sum of primary-token balances subtracted from
-	// raw totalSupply (non-circulating vaults / LP with pending burn).
-	if (supplyExclusionsOnchainTokens > 0) data.supplyExclusionsOnchainTokens = supplyExclusionsOnchainTokens.toFixed(6)
+	// Reserve breakdown — consumed by the Midas frontend to display the composition per source.
+	if (args.emailNavUSD !== null && args.emailNavUSD > 0) data.fundManagerNavUSD = args.emailNavUSD.toFixed(2)
+	if (args.oneTokenOnchainAUMUSD !== null) data.oneTokenOnchainAUM = args.oneTokenOnchainAUMUSD.toFixed(2)
+	if (args.onchainReserveUSD > 0) data.onchainReserveWalletsUSD = args.onchainReserveUSD.toFixed(2)
+	if (args.opsClaimData.navReportedByOpsGross != null) data.opsGrossReserveNative = args.opsClaimData.navReportedByOpsGross
 
 	return new ObjectClaim({
 		id: 'overcollateralization',
 		format: 'json',
 		data,
-		description: 'Overcollateralization verification',
+		description: 'Overcollateralization verification (gross reserve ≥ TVL, USD)',
 		proof: CRE_CONSENSUS_PROOF,
 	})
 }

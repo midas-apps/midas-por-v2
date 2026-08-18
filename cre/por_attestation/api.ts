@@ -218,16 +218,32 @@ export function readOraclePrice(
 		functionName: 'latestRoundData',
 	})
 
-	const result = oracleEvmClient
-		.callContract(runtime, {
-			call: encodeCallMsg({
-				from: zeroAddress,
-				to: oracleAddress as `0x${string}`,
-				data: callData,
-			}),
-			blockNumber: LATEST_BLOCK_NUMBER,
-		})
-		.result()
+	// Retry transient capability/RPC timeouts ("request expired by executable server") a couple
+	// of times before failing this node — a single-node oracle read dropout otherwise costs us a
+	// node in consensus for no good reason.
+	let result: { data: Uint8Array } | undefined
+	let lastErr: unknown
+	for (let attempt = 1; attempt <= 3; attempt++) {
+		try {
+			result = oracleEvmClient
+				.callContract(runtime, {
+					call: encodeCallMsg({
+						from: zeroAddress,
+						to: oracleAddress as `0x${string}`,
+						data: callData,
+					}),
+					blockNumber: LATEST_BLOCK_NUMBER,
+				})
+				.result()
+			break
+		} catch (e) {
+			lastErr = e
+			runtime.log(`WARN: oracle read attempt ${attempt}/3 failed for ${oracleAddress}: ${e instanceof Error ? e.message : String(e)}`)
+		}
+	}
+	if (!result) {
+		throw lastErr instanceof Error ? lastErr : new Error(`oracle read failed for ${oracleAddress} after 3 attempts`)
+	}
 
 	const decoded = decodeFunctionResult({
 		abi: aggregatorV3ABI,
@@ -468,6 +484,9 @@ export interface OneTokenReportData {
 	 *  on-chain valuation in millions USD. Off-chain portion is recovered from the
 	 *  vlayer-notarized fund manager email and added back downstream. */
 	equityOnchain: number
+	/** Sum of the off-chain entries subtracted from equity.total (millions USD). 0 means no
+	 *  off-chain key (e.g. general_wallet) was found — a double-count red flag for additive funds. */
+	offchainEquity: number
 	navBase?: number
 	/** Pending redemption extracted from nav_by_wallet entries matching the pattern. Unit matches the AUM unit: raw base currency (e.g. BTC) when useNavBase=true, USD otherwise (already converted from millions). Only present if a pattern was provided to fetch. */
 	pendingRedemption?: number
@@ -544,7 +563,10 @@ function fetchOneTokenReportInternal(
 	// Subtract off-chain keys (default `general_wallet`) to isolate the on-chain
 	// equity. For mFONE: 72.6M total − 69.6M general_wallet = 3.03M on-chain.
 	const offchainEquity = offchainEquityKeys.reduce((acc, k) => acc + (equity[k] ?? 0), 0)
-	const equityOnchain = (equity.total ?? 0) - offchainEquity
+	// Floor at 0: if the off-chain keys exceed equity.total the on-chain portion is not negative,
+	// it is unknown/zero — a negative value would wrongly deflate method-1 and false-fail a healthy
+	// token. The caller logs when the raw (pre-floor) value was negative.
+	const equityOnchain = Math.max(0, (equity.total ?? 0) - offchainEquity)
 
 	const navBaseCurrencyTotal = reports?.nav_by_chain?.pv_base?.total
 	const pendingRaw = pendingPattern ? sumNavByWalletPattern(reports, pendingPattern, useNavBase) : undefined
@@ -558,6 +580,7 @@ function fetchOneTokenReportInternal(
 		liabilities: sanitize(report.liabilities ?? {}),
 		equity,
 		equityOnchain,
+		offchainEquity,
 		...(typeof navBaseCurrencyTotal === 'number' ? { navBase: navBaseCurrencyTotal } : {}),
 		...(typeof pending === 'number' ? { pendingRedemption: pending } : {}),
 	}
@@ -713,4 +736,95 @@ export function fetchMidasTotalSupply(
 		runtime.log(`WARN: Midas supply API call failed (${msg}), method-1 unavailable`)
 		return null
 	}
+}
+
+// ============================ Solana (SPL) reads ============================
+// Solana tokens (solmFONE, solmHYPER) are not EVM: the supply comes from the SPL mint
+// (getTokenSupply) and the price from the Midas "manual feed" account (21-byte layout:
+// discriminator[8] + price u64 LE + decimals u8 + updatedAt u32 LE). Both are read over a
+// public Solana JSON-RPC in node mode, same consensus pattern as the EVM/HTTP reads. The
+// internal returns only JSON-serializable primitives so consensus aggregation is exact.
+
+const SOLANA_B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+function base64ToBytes(s: string): Uint8Array {
+	const clean = s.replace(/[^A-Za-z0-9+/]/g, '')
+	const out: number[] = []
+	let buf = 0, bits = 0
+	for (let i = 0; i < clean.length; i++) {
+		buf = (buf << 6) | SOLANA_B64.indexOf(clean[i])
+		bits += 6
+		if (bits >= 8) { bits -= 8; out.push((buf >> bits) & 0xff) }
+	}
+	return new Uint8Array(out)
+}
+
+function solanaRpc(nodeRuntime: NodeRuntime<Config>, rpcUrl: string, method: string, params: unknown[]): any {
+	const httpClient = new HTTPClient()
+	const body = stringToBase64(JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }))
+	const response = httpClient.sendRequest(nodeRuntime, {
+		url: rpcUrl,
+		method: 'POST' as const,
+		headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+		body,
+		timeout: '10s',
+		cacheSettings: { store: true, maxAge: '30s' },
+	}).result()
+	const bodyText = response.body ? new TextDecoder().decode(response.body) : ''
+	if (response.statusCode !== 200) {
+		throw new Error(`Solana RPC ${method} status ${response.statusCode}: ${bodyText.slice(0, 200)}`)
+	}
+	const parsed = JSON.parse(bodyText)
+	if (parsed.error) throw new Error(`Solana RPC ${method} error: ${JSON.stringify(parsed.error).slice(0, 200)}`)
+	return parsed.result
+}
+
+interface SolanaSupplyRaw { amount: string; decimals: number }
+interface SolanaFeedRaw { answerStr: string; decimals: number; updatedAt: number }
+
+function fetchSolanaSupplyInternal(nodeRuntime: NodeRuntime<Config>, rpcUrl: string, mint: string): SolanaSupplyRaw {
+	const result = solanaRpc(nodeRuntime, rpcUrl, 'getTokenSupply', [mint])
+	const v = result?.value
+	if (!v || typeof v.amount !== 'string' || typeof v.decimals !== 'number') {
+		throw new Error(`Solana getTokenSupply bad response for mint ${mint}`)
+	}
+	return { amount: v.amount, decimals: v.decimals }
+}
+
+function fetchSolanaPriceInternal(nodeRuntime: NodeRuntime<Config>, rpcUrl: string, priceFeed: string): SolanaFeedRaw {
+	const result = solanaRpc(nodeRuntime, rpcUrl, 'getAccountInfo', [priceFeed, { encoding: 'base64' }])
+	const dataField = result?.value?.data
+	const b64 = Array.isArray(dataField) ? dataField[0] : undefined
+	if (!b64) throw new Error(`Solana price feed ${priceFeed} has no data`)
+	const bytes = base64ToBytes(b64)
+	// layout: disc[0..8) | price u64 LE [8..16) | decimals u8 [16] | updatedAt u32 LE [17..21)
+	if (bytes.length < 21) throw new Error(`Solana price feed ${priceFeed} too short (${bytes.length} bytes)`)
+	let price = 0n
+	for (let i = 0; i < 8; i++) price += BigInt(bytes[8 + i]) << BigInt(8 * i)
+	const decimals = bytes[16]
+	const updatedAt = bytes[17] + bytes[18] * 256 + bytes[19] * 65536 + bytes[20] * 16777216
+	if (price <= 0n) throw new Error(`Solana price feed ${priceFeed} returned non-positive price`)
+	return { answerStr: price.toString(), decimals, updatedAt }
+}
+
+/** SPL total supply (decimal units) with DON consensus. */
+export function fetchSolanaSupply(runtime: Runtime<Config>, rpcUrl: string, mint: string): number {
+	const raw = runtime.runInNodeMode(
+		(nodeRuntime: NodeRuntime<Config>) => fetchSolanaSupplyInternal(nodeRuntime, rpcUrl, mint),
+		consensusIdenticalAggregation<SolanaSupplyRaw>()
+	)().result()
+	return Number(BigInt(raw.amount)) / Math.pow(10, raw.decimals)
+}
+
+/** Price from the Midas Solana manual feed, shaped like an EVM OraclePriceData. Rejects a
+ *  stale feed (default 30-day max, matching the feed's own staleness config). */
+export function fetchSolanaPrice(runtime: Runtime<Config>, rpcUrl: string, priceFeed: string, maxStalenessSec: number = 2592000): OraclePriceData {
+	const raw = runtime.runInNodeMode(
+		(nodeRuntime: NodeRuntime<Config>) => fetchSolanaPriceInternal(nodeRuntime, rpcUrl, priceFeed),
+		consensusIdenticalAggregation<SolanaFeedRaw>()
+	)().result()
+	const nowSec = Math.floor(runtime.now().getTime() / 1000)
+	if (nowSec - raw.updatedAt > maxStalenessSec) {
+		throw new Error(`Solana price feed ${priceFeed} is stale: updated ${nowSec - raw.updatedAt}s ago (max ${maxStalenessSec}s)`)
+	}
+	return { answer: BigInt(raw.answerStr), decimals: raw.decimals, updatedAt: raw.updatedAt }
 }

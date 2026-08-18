@@ -16,9 +16,9 @@ import {
 } from '@chainlink/cre-sdk'
 import { decodeAbiParameters, encodeFunctionData, decodeFunctionResult, zeroAddress } from 'viem'
 import { SaveRegistryWithClaim } from '../contracts/abi/SaveRegistryWithClaim.js'
-import { configSchema, type Config, type TokenConfig, getNetworkByChainSelector } from './config.js'
+import { configSchema, tokenConfigSchema, type Config, type TokenConfig, getNetworkByChainSelector } from './config.js'
 import { CRE_CONFIDENCE_MAP, getBlockNumberByConfidence } from '../library/config-schemas.js'
-import { verifyClaimWithVlayer, readOraclePrice, fetchOneTokenReport, fetchSupplyDetails, fetchMidasTotalSupply, extractNavFromEmail, readOnchainTotalSupply, readErc20BalanceDecimal } from './api.js'
+import { verifyClaimWithVlayer, readOraclePrice, fetchOneTokenReport, fetchSupplyDetails, fetchMidasTotalSupply, extractNavFromEmail, readOnchainTotalSupply, readErc20BalanceDecimal, fetchSolanaSupply, fetchSolanaPrice } from './api.js'
 import type { OneTokenReportData, OnchainSupplyData } from './api.js'
 import { hashToIPFSCid, ipfsCidToHash } from '../library/utils.js'
 import { fetchFromIpfs, pushToIpfsPinata, compressJson, decompressJson } from '../library/ipfs.js'
@@ -29,8 +29,7 @@ import {
 	createOpsClaimObject,
 	createOraclePriceObjectClaim,
 	createOraclePriceNumericClaim,
-	createInternalOvercollateralizationClaim,
-	createExternalOvercollateralizationClaim,
+	createOvercollateralizationClaim,
 	createOvercollateralizationRatioClaim,
 	createFundManagerEmailClaim,
 	createEmailNavExtractedClaim,
@@ -112,7 +111,17 @@ function resolveTokens(runtime: Runtime<Config>): Record<string, TokenConfig> {
 			merged[proofId.toLowerCase()] = cfg
 		}
 		for (const [proofId, cfg] of Object.entries(fetched.tokens)) {
-			merged[proofId.toLowerCase()] = cfg as TokenConfig
+			// Parse (not cast) so schema DEFAULTS apply — the registry JSON is raw, so casting
+			// would leave defaulted fields (usdcAddress, offchainEquityKeys, timestampOffsetHoursBack,
+			// maxStalenessSec…) undefined and crash downstream reads. Skip a malformed token with a
+			// warning rather than aborting the whole registry.
+			const parsed = tokenConfigSchema.safeParse(cfg)
+			if (parsed.success) {
+				merged[proofId.toLowerCase()] = parsed.data
+			} else {
+				const why = parsed.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ')
+				runtime.log(`WARN: registry token ${proofId} failed validation, skipping — ${why.slice(0, 200)}`)
+			}
 		}
 		runtime.log(`Token registry: ${Object.keys(merged).length} tokens (remote: ${Object.keys(fetched.tokens).length}, inline fallbacks: ${Object.keys(inline).length})`)
 		return merged
@@ -314,19 +323,41 @@ const runWorkflow = async (
 
 		runtime.log(`Ops claim: token=${opsClaimData.token}, navReportedByOps=${opsClaimData.navReportedByOps}${opsClaimData.navReportedByOpsGross ? ` (gross=${opsClaimData.navReportedByOpsGross})` : ''}, supply=${opsClaimData.totalSupplyCrossChainReportedByOps}`)
 
-		// 2. Read oracle price on-chain
+		// 2. Read price: Solana manual feed (SPL tokens) or EVM oracle on-chain
 
-		runtime.log(`Reading oracle price from ${opsClaimData.oracleAddress} on ${opsClaimData.oracleChainSelectorName}`)
+		let oraclePriceData
+		if (tokenConfig.solana) {
+			runtime.log(`Reading Solana manual price feed ${tokenConfig.solana.priceFeed}`)
+			oraclePriceData = fetchSolanaPrice(runtime, tokenConfig.solana.rpcUrl, tokenConfig.solana.priceFeed, tokenConfig.solana.maxStalenessSec)
+		} else {
+			runtime.log(`Reading oracle price from ${opsClaimData.oracleAddress} on ${opsClaimData.oracleChainSelectorName}`)
+			oraclePriceData = readOraclePrice(
+				runtime,
+				opsClaimData.oracleAddress,
+				opsClaimData.oracleChainSelectorName,
+				8,
+			)
+		}
 
-		const oraclePriceData = readOraclePrice(
-			runtime,
-			opsClaimData.oracleAddress,
-			opsClaimData.oracleChainSelectorName,
-			8,
-		)
+		let oraclePriceUSD = Number(oraclePriceData.answer) / Math.pow(10, oraclePriceData.decimals)
+		runtime.log(`Oracle price: ${oraclePriceUSD} (raw: ${oraclePriceData.answer})`)
+		if (!(oraclePriceUSD > 0)) {
+			throw new Error(`Invalid oracle price for ${tokenConfig.name}: ${oraclePriceUSD} (raw ${oraclePriceData.answer}, feed ${opsClaimData.oracleAddress}) — oracle must return a positive answer.`)
+		}
 
-		const oraclePriceUSD = Number(oraclePriceData.answer) / Math.pow(10, oraclePriceData.decimals)
-		runtime.log(`Oracle price: ${oraclePriceUSD} USD (raw: ${oraclePriceData.answer})`)
+		// Non-USD oracle (mHyperBTC/BTC, mGLOeuro/EUR): convert the quote currency to USD via a
+		// Chainlink feed so TVL and reserve are USD-denominated. `quoteRate` also scales the ops
+		// NAV (reported in the oracle's native currency) in the fallback candidate below.
+		let quoteRate = 1
+		if (tokenConfig.oracleQuoteFeed) {
+			const quoteData = readOraclePrice(runtime, tokenConfig.oracleQuoteFeed, tokenConfig.chainSelectorName, 8)
+			quoteRate = Number(quoteData.answer) / Math.pow(10, quoteData.decimals)
+			if (!(quoteRate > 0)) {
+				throw new Error(`Invalid oracle quote-feed rate for ${tokenConfig.name}: ${quoteRate} (feed ${tokenConfig.oracleQuoteFeed}) — quote feed must return a positive answer.`)
+			}
+			oraclePriceUSD = oraclePriceUSD * quoteRate
+			runtime.log(`Oracle quote conversion ×${quoteRate} (feed ${tokenConfig.oracleQuoteFeed}) → price ${oraclePriceUSD} USD`)
+		}
 
 		// 2.5. Read on-chain total supply
 
@@ -353,10 +384,19 @@ const runWorkflow = async (
 		let emailReceiverClaim: ReturnType<typeof createEmailReceiverClaim> | null = null
 
 		const ZERO_HASH = '0x0000000000000000000000000000000000000000000000000000000000000000'
-		if (opsClaimData.vlayerClaimHash && opsClaimData.vlayerClaimHash.toLowerCase() !== ZERO_HASH) {
+		const hasVlayerHash = opsClaimData.vlayerClaimHash != null && opsClaimData.vlayerClaimHash.toLowerCase() !== ZERO_HASH
+		if (hasVlayerHash && !tokenConfig.fundManager) {
+			// Defensive: ops pushed a vlayer claim for a token that has NO `fundManager` in the token
+			// registry — e.g. a 1token/CEX-only token (mHYPER, mHyperBTC, mWIN, mTBILL), or a
+			// fundManager wired into ops before the registry entry was added. Skip vlayer and process
+			// via 1token + ops instead of crashing on the missing config. When a `fundManager` IS
+			// present, the branch below uses its exact fields (expectedEmail, receiver, navFields,
+			// navIsTotal) — so adding one to the registry later "just works" with no code change.
+			runtime.log(`WARN: ops pushed a vlayerClaimHash for ${tokenConfig.name} but no fundManager is configured in the registry — skipping vlayer, processing via 1token/ops only`)
+		} else if (hasVlayerHash && tokenConfig.fundManager) {
 
 			runtime.log(`Fetching Vlayer claim from IPFS: ${opsClaimData.vlayerClaimHash}`)
-			const vlayerCid = hashToIPFSCid(opsClaimData.vlayerClaimHash)
+			const vlayerCid = hashToIPFSCid(opsClaimData.vlayerClaimHash!)
 
 			const vlayerCompressed = runtime.runInNodeMode(
 				(nodeRuntime: NodeRuntime<Config>) => fetchFromIpfs(nodeRuntime as any, vlayerCid),
@@ -393,12 +433,6 @@ const runWorkflow = async (
 
 		const totalSupplyTokens = Number(BigInt(opsClaimData.totalSupplyCrossChainReportedByOps)) / 1e18
 		const threshold = runtime.config.overcollateralizationThreshold
-		const deviationThreshold = runtime.config.oneTokenDeviationThresholdPercent
-
-		const computeRatio = (aum: number, supplyTokens: number): number => {
-			const navPerToken = supplyTokens > 0 ? aum / supplyTokens : 0
-			return oraclePriceUSD > 0 ? navPerToken / oraclePriceUSD : 0
-		}
 
 		if (tokenConfig.oneTokenApi) {
 			try {
@@ -485,6 +519,16 @@ const runWorkflow = async (
 						const useNavBase = tokenConfig.oneTokenApi.useNavBase && typeof report.navBase === 'number'
 						oneTokenOnchainAUM = useNavBase ? report.navBase! : report.equityOnchain * 1_000_000
 						runtime.log(`1token AUM: ${oneTokenOnchainAUM.toFixed(0)} USD (ts=${ts})`)
+						// B: on-chain equity was floored to 0 upstream (off-chain keys exceeded total) — surface it.
+						if ((report.equity.total ?? 0) - report.offchainEquity < 0) {
+							runtime.log(`WARN: ${tokenConfig.name} 1token on-chain equity negative (total=${(report.equity.total ?? 0).toFixed(2)}M − offchain=${report.offchainEquity.toFixed(2)}M), floored to 0`)
+						}
+						// C: double-count trip-wire. For an additive fund (navIsTotal=false) the 1token report MUST
+						// subtract the off-chain fund-share account (general_wallet); if nothing was subtracted, the
+						// full equity (incl. fund shares) is about to be added to the vlayer NAV → double-count.
+						if (tokenConfig.fundManager && !tokenConfig.fundManager.navIsTotal && report.offchainEquity === 0 && oneTokenOnchainAUM > 0) {
+							runtime.log(`WARN: ${tokenConfig.name} navIsTotal=false but 1token subtracted 0 off-chain equity (offchainEquityKeys=${JSON.stringify(tokenConfig.oneTokenApi.offchainEquityKeys ?? ['general_wallet'])} not found) — risk of double-counting the fund NAV with vlayer; verify the 1token general_wallet key.`)
+						}
 						break
 					}
 				}
@@ -533,7 +577,8 @@ const runWorkflow = async (
 		if (roc && roc.usdcWallets.length > 0) {
 			for (const wallet of roc.usdcWallets) {
 				try {
-					const bal = readErc20BalanceDecimal(runtime, roc.usdcAddress, wallet, tokenConfig.chainSelectorName, 6)
+					const usdcAddr = roc.usdcAddress ?? '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'
+					const bal = readErc20BalanceDecimal(runtime, usdcAddr, wallet, tokenConfig.chainSelectorName, 6)
 					onchainReserveUSD += bal
 					runtime.log(`Reserve on-chain USDC ${wallet.slice(0, 10)}...: $${bal.toFixed(2)}`)
 				} catch (e) {
@@ -557,187 +602,92 @@ const runWorkflow = async (
 			}
 		}
 
-		// For `useNavBase` tokens, `oneTokenOnchainAUM` and `pendingRedemption` are in the
-		// token's base currency (e.g. BTC). Ops reports `navReportedByOps` in USD across
-		// all tokens, so every comparison and ratio downstream is USD-denominated. Convert
-		// the base-currency values here once so both the deviation log and the ratio math
-		// operate on apples-to-apples USD numbers.
+		// 1token equity is always USD (equityOnchain × 1e6). The legacy `useNavBase` path
+		// (equity in the token's base currency) is deprecated — 1token's `pv_base` is unreliable
+		// for multi-chain tokens (e.g. mHyperBTC, where non-cex chains come back in wrong units),
+		// so every onboarded token uses `useNavBase:false`. Kept defensively for any future token
+		// whose base-currency snapshot is trustworthy.
 		const oneTokenOnchainAUMUSD = oneTokenOnchainAUM !== null && useNavBase
 			? oneTokenOnchainAUM * oraclePriceUSD
 			: oneTokenOnchainAUM
-		const pendingRedemptionUSD = useNavBase ? pendingRedemption * oraclePriceUSD : pendingRedemption
 
-		// External NAV deviation vs ops — comparing apples-to-apples in USD
+		// ===================== Overcollateralization (GROSS reserve ≥ TVL, USD) =====================
+		// TVL = gross on-chain supply × oraclePriceUSD (oracle already USD-converted via oracleQuoteFeed
+		// for non-USD oracles). Gross reserve candidates, first above threshold wins:
+		//   method-1 (independent): vlayer fund NAV + 1token on-chain equity + on-chain reserves
+		//   method-2 (fallback):    ops-reported gross × quoteRate
+		// No net/pending subtraction, no price cross-check. Everything USD → BTC/EUR oracles work
+		// once oracleQuoteFeed is set (mHyperBTC/BTC, mGLOeuro/EUR).
 
-		{
-			const fm = tokenConfig.fundManager
-			const opsNavUsed = parseFloat(opsClaimData.navReportedByOps)
+		const fm = tokenConfig.fundManager
 
-			let externalAUMGrossUSD: number | null = null
-			let externalLabel: string = ''
-			if (oneTokenOnchainAUMUSD !== null && fm && !fm.navIsTotal && emailNavUSD !== null) {
-				externalAUMGrossUSD = oneTokenOnchainAUMUSD + emailNavUSD
-				externalLabel = '1token+fasanara_vlayer'
-			} else if (fm?.navIsTotal && emailNavUSD !== null) {
-				externalAUMGrossUSD = emailNavUSD
-				externalLabel = 'vlayer_total'
-			} else if (oneTokenOnchainAUMUSD !== null) {
-				externalAUMGrossUSD = oneTokenOnchainAUMUSD
-				externalLabel = '1token'
-			}
-
-			if (externalAUMGrossUSD !== null && opsNavUsed > 0) {
-				const externalAUMNetUSD = externalAUMGrossUSD - pendingRedemptionUSD
-				const opsNetForDev = tokenConfig.opsNavIsNetOfPending
-					? opsNavUsed
-					: opsNavUsed - pendingRedemptionUSD
-				if (opsNetForDev <= 0) {
-					throw new Error(`Invalid ops NAV for deviation: opsNetForDev=${opsNetForDev} (opsNavUsed=${opsNavUsed}, pendingUSD=${pendingRedemptionUSD}, opsNavIsNetOfPending=${!!tokenConfig.opsNavIsNetOfPending}) — pending exceeds NAV or ops payload is malformed`)
-				}
-				const dev = Math.abs((externalAUMNetUSD - opsNetForDev) / opsNetForDev) * 100
-				runtime.log(`External NAV (${externalLabel}) vs ops deviation: external_net=${externalAUMNetUSD.toFixed(0)} USD (gross=${externalAUMGrossUSD.toFixed(0)} - pending=${pendingRedemptionUSD.toFixed(0)}), ops_net=${opsNetForDev.toFixed(0)} USD (raw=${opsNavUsed.toFixed(0)}${tokenConfig.opsNavIsNetOfPending ? ' already net' : ' - pending'}), deviation=${dev.toFixed(2)}% (threshold: ${deviationThreshold}%)${dev > deviationThreshold ? ' ⚠ EXCEEDS THRESHOLD' : ''}`)
-			}
-
-			// Cross-check sanity: if navIsTotal=true, log deviation vlayer vs 1token (both estimate total, both USD)
-			if (fm?.navIsTotal && emailNavUSD !== null && oneTokenOnchainAUMUSD !== null && oneTokenOnchainAUMUSD > 0) {
-				const dev = Math.abs((emailNavUSD - oneTokenOnchainAUMUSD) / oneTokenOnchainAUMUSD) * 100
-				runtime.log(`Cross-check vlayer_total vs 1token: vlayer=${emailNavUSD.toFixed(0)} USD, 1token=${oneTokenOnchainAUMUSD.toFixed(0)} USD, deviation=${dev.toFixed(2)}%${dev > deviationThreshold ? ' ⚠' : ''}`)
-			}
-		}
-
-		// Method-1 supply: external Midas endpoint - pending redemption (independent of ops)
-		// Falls back to method-2 (ops supply) if:
-		//   - endpoint unreachable or no token address configured
-		//   - the configured pending source(s) failed to return data, making the
-		//     effective supply unreliable (e.g., 1token report down but a wallet
-		//     pattern was expected from it)
-
-		let method1SupplyTokens: number | null = null
-		let supplyExclusionsOnchainTokens = 0
-
-		const requiresOneTokenForPending = prs?.oneTokenWalletPattern != null
-		const oneTokenAvailable = oneTokenRawReport !== null
-		if (requiresOneTokenForPending && !oneTokenAvailable) {
-			runtime.log('Method-1 unavailable: 1token report failed but pendingRedemptionSource.oneTokenWalletPattern is configured — falling back to method-2')
+		// Gross on-chain supply (cross-chain Midas endpoint), fallback ops-reported supply.
+		let grossSupplyTokens = totalSupplyTokens
+		let supplySource: 'onchain' | 'ops' | 'solana' = 'ops'
+		if (tokenConfig.solana) {
+			grossSupplyTokens = fetchSolanaSupply(runtime, tokenConfig.solana.rpcUrl, tokenConfig.solana.mint)
+			supplySource = 'solana'
+			runtime.log(`Gross supply (Solana SPL ${tokenConfig.solana.mint}): ${grossSupplyTokens.toFixed(4)}`)
+			if (!(grossSupplyTokens > 0)) throw new Error(`Solana supply is zero for ${tokenConfig.name}.`)
 		} else if (tokenConfig.address && oraclePriceUSD > 0) {
-			// Use the 1token anchor timestamp so AUM (1token) and supply (Midas API)
-			// are sampled at the same moment — apples-to-apples ratio.
 			const anchorForSupply = oneTokenAnchorISO ?? opsClaimData.createdAt
 			const eventTsSec = Math.floor(new Date(anchorForSupply).getTime() / 1000)
 			const midasSupply = fetchMidasTotalSupply(runtime, tokenConfig.address, eventTsSec, tokenConfig.chainSelectorName)
-
-			if (midasSupply) {
-				runtime.log(`Method-1 external supply: ${midasSupply.supply.toFixed(2)} tokens (${Object.keys(midasSupply.supplyByChain).length} chains)`)
-
-				if (midasSupply.supply > 0 && totalSupplyTokens > 0) {
-					const supplyRatio = totalSupplyTokens / midasSupply.supply
-					if (supplyRatio < 0.5 || supplyRatio > 2.0) {
-						runtime.log(`Sanity check triggered: ops=${totalSupplyTokens.toFixed(2)}, onchain=${midasSupply.supply.toFixed(2)}, ratio=${supplyRatio.toFixed(4)}`)
+			if (midasSupply && midasSupply.supply > 0) {
+				grossSupplyTokens = midasSupply.supply
+				supplySource = 'onchain'
+				runtime.log(`Gross supply (on-chain, ${Object.keys(midasSupply.supplyByChain).length} chains): ${grossSupplyTokens.toFixed(2)}`)
+				if (totalSupplyTokens > 0) {
+					const sr = totalSupplyTokens / midasSupply.supply
+					if (sr < 0.5 || sr > 2.0) {
+						runtime.log(`Sanity: ops supply ${totalSupplyTokens.toFixed(2)} vs on-chain ${midasSupply.supply.toFixed(2)} (ratio ${sr.toFixed(3)})`)
 						throw new Error(`Pre-flight sanity check failed for ${tokenConfig.name}.`)
 					}
 				}
-
-				// Supply exclusions: subtract on-chain balances of the primary token in
-				// configured non-circulating wallets (redemption vault, burn queue, LP
-				// waiting-to-burn). Each failed balanceOf is treated as 0 (skipped).
-				if (tokenConfig.supplyExclusionWallets && tokenConfig.supplyExclusionWallets.length > 0 && tokenConfig.address) {
-					for (const wallet of tokenConfig.supplyExclusionWallets) {
-						try {
-							const bal = readErc20BalanceDecimal(runtime, tokenConfig.address, wallet, tokenConfig.chainSelectorName, 18)
-							supplyExclusionsOnchainTokens += bal
-							runtime.log(`Supply exclusion ${wallet.slice(0, 10)}...: ${bal.toFixed(2)} tokens`)
-						} catch (e) {
-							runtime.log(`WARN: supply exclusion balanceOf failed for ${wallet}: ${e instanceof Error ? e.message : String(e)}`)
-						}
-					}
-					if (supplyExclusionsOnchainTokens > 0) {
-						runtime.log(`Supply exclusions total: ${supplyExclusionsOnchainTokens.toFixed(2)} tokens`)
-					}
-				}
-				const onchainExclusions = supplyExclusionsOnchainTokens
-
-				const pendingTokens = pendingRedemptionUSD / oraclePriceUSD
-				const effectiveSupply = midasSupply.supply - pendingTokens - onchainExclusions
-				if (effectiveSupply > 0) {
-					method1SupplyTokens = effectiveSupply
-					runtime.log(`Method-1 effective supply: ${effectiveSupply.toFixed(2)} tokens (gross=${midasSupply.supply.toFixed(2)} - pending=${pendingTokens.toFixed(2)}${onchainExclusions > 0 ? ` - onchainExclusions=${onchainExclusions.toFixed(2)}` : ''})`)
-				} else {
-					runtime.log(`WARN: Method-1 effective supply <= 0, skipping method-1`)
-				}
+			} else {
+				runtime.log('Gross supply: Midas endpoint unavailable — using ops-reported supply')
 			}
 		}
+		const tvlUSD = grossSupplyTokens * oraclePriceUSD
 
-		// Overcollateralization — prioritized candidates
-		// Per AUM, try method-1 supply (endpoint - pending) first, then method-2 (ops supply).
-		// Case A (navIsTotal=false, additive offchain): 1token+vlayer → 1token → ops
-		// Case B (navIsTotal=true, cross-check): 1token → vlayer → ops
-		// Case C (no fundManager): 1token → ops
+		// Gross reserve candidates (all USD). First above threshold wins.
+		const opsGrossUSD = (opsClaimData.navReportedByOpsGross != null
+			? parseFloat(opsClaimData.navReportedByOpsGross)
+			: parseFloat(opsClaimData.navReportedByOps)) * quoteRate
 
-		type OvercolCandidate = { totalAUM: number; aumSource: string; supplyTokens: number; supplySource: 'method-1' | 'method-2'; ratio: number }
-		let selectedCandidate: OvercolCandidate | null = null
+		const candidates: Array<{ grossReserveUSD: number; aumSource: string; supplySource: 'method-1' | 'method-2' }> = []
+		if (fm?.navIsTotal && emailNavUSD !== null) {
+			candidates.push({ grossReserveUSD: emailNavUSD + onchainReserveUSD, aumSource: 'method-1:vlayer_total', supplySource: 'method-1' })
+		} else if (fm && !fm.navIsTotal && emailNavUSD !== null && oneTokenOnchainAUMUSD !== null) {
+			candidates.push({ grossReserveUSD: emailNavUSD + oneTokenOnchainAUMUSD + onchainReserveUSD, aumSource: 'method-1:vlayer+1token', supplySource: 'method-1' })
+		} else if (!fm && oneTokenOnchainAUMUSD !== null) {
+			candidates.push({ grossReserveUSD: oneTokenOnchainAUMUSD + onchainReserveUSD, aumSource: 'method-1:1token', supplySource: 'method-1' })
+		}
+		candidates.push({ grossReserveUSD: opsGrossUSD, aumSource: 'method-2:ops', supplySource: 'method-2' })
 
-		const fm = tokenConfig.fundManager
-		const opsNavUSD = parseFloat(opsClaimData.navReportedByOps)
-
-		const trySupplies: Array<{ tokens: number; source: 'method-1' | 'method-2' }> = []
-		if (method1SupplyTokens !== null) trySupplies.push({ tokens: method1SupplyTokens, source: 'method-1' })
-		trySupplies.push({ tokens: totalSupplyTokens, source: 'method-2' })
-
-		for (const { tokens: supplyTokens, source: supplySource } of trySupplies) {
-			if (selectedCandidate) break
-
-			// Both method-1 and method-2 supplies are net of pending payouts:
-			//   - method-1 supply = Midas endpoint − pending (computed above)
-			//   - method-2 supply = ops totalSupplyCrossChainReportedByOps (already net)
-			// External AUMs (1token + vlayer) must exclude the same pending amount to stay
-			// apples-to-apples with the denominator. The ratio is a net-vs-net check.
-			const aumPendingAdj = pendingRedemptionUSD
-
-			if (oneTokenOnchainAUMUSD !== null) {
-				if (fm && !fm.navIsTotal && emailNavUSD !== null) {
-					const grossAUM = oneTokenOnchainAUMUSD + emailNavUSD + onchainReserveUSD
-					const totalAUM = grossAUM - aumPendingAdj
-					const ratio = computeRatio(totalAUM, supplyTokens)
-					runtime.log(`Candidate ${supplySource} 1token+fasanara_vlayer: ratio=${ratio.toFixed(4)}, AUM=${totalAUM.toFixed(0)} (1token=${oneTokenOnchainAUMUSD.toFixed(0)}, vlayer=${emailNavUSD.toFixed(0)}${onchainReserveUSD > 0 ? `, +onchainReserve=${onchainReserveUSD.toFixed(0)}` : ''}${aumPendingAdj > 0 ? `, -pending=${aumPendingAdj.toFixed(0)}` : ''}), supply=${supplyTokens.toFixed(2)}`)
-					if (ratio > threshold) { selectedCandidate = { totalAUM, aumSource: '1token+fasanara_vlayer', supplyTokens, supplySource, ratio }; continue }
-				}
-
-				if (!selectedCandidate) {
-					const totalAUM = oneTokenOnchainAUMUSD + onchainReserveUSD - aumPendingAdj
-					const ratio = computeRatio(totalAUM, supplyTokens)
-					runtime.log(`Candidate ${supplySource} 1token: ratio=${ratio.toFixed(4)}, AUM=${totalAUM.toFixed(0)}${aumPendingAdj > 0 ? ` (1token=${oneTokenOnchainAUMUSD.toFixed(0)} -pending=${aumPendingAdj.toFixed(0)})` : ''}, supply=${supplyTokens.toFixed(2)}`)
-					if (ratio > threshold) { selectedCandidate = { totalAUM, aumSource: '1token', supplyTokens, supplySource, ratio }; continue }
-				}
-			}
-
-			if (!selectedCandidate && fm?.navIsTotal && emailNavUSD !== null) {
-				const totalAUM = emailNavUSD - aumPendingAdj
-				const ratio = computeRatio(totalAUM, supplyTokens)
-				runtime.log(`Candidate ${supplySource} vlayer_total: ratio=${ratio.toFixed(4)}, AUM=${totalAUM.toFixed(0)}${aumPendingAdj > 0 ? ` (vlayer=${emailNavUSD.toFixed(0)} -pending=${aumPendingAdj.toFixed(0)})` : ''}, supply=${supplyTokens.toFixed(2)}`)
-				if (ratio > threshold) { selectedCandidate = { totalAUM, aumSource: 'vlayer', supplyTokens, supplySource, ratio }; continue }
-			}
-
-			if (!selectedCandidate && supplySource === 'method-2') {
-				const ratio = computeRatio(opsNavUSD, supplyTokens)
-				runtime.log(`Candidate ${supplySource} ops: ratio=${ratio.toFixed(4)}, AUM=${opsNavUSD.toFixed(0)}, supply=${supplyTokens.toFixed(2)}`)
-				if (ratio > threshold) selectedCandidate = { totalAUM: opsNavUSD, aumSource: 'ops', supplyTokens, supplySource, ratio }
-			}
+		let selectedCandidate: { grossReserveUSD: number; aumSource: string; supplySource: 'method-1' | 'method-2'; ratio: number } | null = null
+		for (const c of candidates) {
+			const ratio = tvlUSD > 0 ? c.grossReserveUSD / tvlUSD : 0
+			runtime.log(`Candidate ${c.aumSource}: reserve=${c.grossReserveUSD.toFixed(0)} / TVL=${tvlUSD.toFixed(0)} (supply ${grossSupplyTokens.toFixed(2)} × ${oraclePriceUSD.toFixed(6)}) = ratio ${ratio.toFixed(4)}`)
+			if (ratio > threshold) { selectedCandidate = { grossReserveUSD: c.grossReserveUSD, aumSource: c.aumSource, supplySource: c.supplySource, ratio }; break }
 		}
 
 		if (!selectedCandidate) {
 			throw new Error(
 				`Overcollateralization check failed for ${tokenConfig.name}. ` +
-				`All candidates below threshold=${threshold}. ` +
-				`Attestation will not be pushed.`
+				`All candidates below threshold=${threshold}. Attestation will not be pushed.`
 			)
 		}
 
-		if (selectedCandidate.ratio > 2.0) {
-			runtime.log(`Post-check triggered: ratio=${selectedCandidate.ratio.toFixed(4)}, AUM=${selectedCandidate.totalAUM.toFixed(0)}, supply=${selectedCandidate.supplyTokens.toFixed(2)}, source=${selectedCandidate.aumSource}`)
-			throw new Error(`Post-flight sanity check failed for ${tokenConfig.name}.`)
+		// Post-flight sanity: the reserve must not exceed on-chain TVL (supply × price) by more than
+		// 30%. A ratio > 1.30 signals a currency mismatch (e.g. ops NAV entered in USD for a BTC/EUR
+		// token so quoteRate double-scales it) or a double-count — reject rather than attest garbage.
+		if (selectedCandidate.ratio > 1.30) {
+			runtime.log(`Post-flight sanity FAILED: ${tokenConfig.name} ratio ${selectedCandidate.ratio.toFixed(4)} > 1.30 (reserve ${selectedCandidate.grossReserveUSD.toFixed(0)} > TVL ${tvlUSD.toFixed(0)} × 1.30), source=${selectedCandidate.aumSource}`)
+			throw new Error(`Post-flight sanity check failed for ${tokenConfig.name}: overcollateralization ratio ${selectedCandidate.ratio.toFixed(4)} exceeds 1.30 (reserve > on-chain TVL + 30%).`)
 		}
 
-		runtime.log(`Overcollateralization passed: ${selectedCandidate.supplySource}, ratio=${selectedCandidate.ratio.toFixed(4)}, supplyTokens=${selectedCandidate.supplyTokens.toFixed(2)}`)
+		runtime.log(`Overcollateralization passed: ${selectedCandidate.aumSource}, ratio=${selectedCandidate.ratio.toFixed(4)}, supply source=${supplySource}`)
 
 		// 7. Build claims
 
@@ -748,26 +698,21 @@ const runWorkflow = async (
 			oraclePriceData,
 		)
 		const oraclePriceNumericClaim = createOraclePriceNumericClaim()
-		const overcollateralizationClaim = selectedCandidate.aumSource === 'ops'
-			? createInternalOvercollateralizationClaim(opsClaimData, oraclePriceData, threshold)
-			: createExternalOvercollateralizationClaim(
-				selectedCandidate.totalAUM,
-				selectedCandidate.aumSource,
-				opsClaimData,
-				oraclePriceData,
-				threshold,
-				selectedCandidate.supplyTokens,
-				selectedCandidate.supplySource,
-				// Always pass USD-denominated values to the claim builder — for `useNavBase`
-				// tokens (e.g. mHyperBTC) the raw `pendingRedemption` / `oneTokenOnchainAUM`
-				// are in the base currency (BTC). Mixing them with USD `totalAUM` in the
-				// claim would produce nonsensical `totalReserveGrossUSD`.
-				pendingRedemptionUSD,
-				oneTokenOnchainAUMUSD,
-				emailNavUSD,
-				onchainReserveUSD,
-				supplyExclusionsOnchainTokens,
-			)
+		const overcollateralizationClaim = createOvercollateralizationClaim({
+			grossReserveUSD: selectedCandidate.grossReserveUSD,
+			grossSupplyTokens,
+			oraclePriceUSD,
+			tvlUSD,
+			ratio: selectedCandidate.ratio,
+			threshold,
+			aumSource: selectedCandidate.aumSource,
+			opsClaimData,
+			oracleRawPrice: Number(oraclePriceData.answer) / Math.pow(10, oraclePriceData.decimals),
+			quoteRate,
+			emailNavUSD,
+			oneTokenOnchainAUMUSD,
+			onchainReserveUSD,
+		})
 
 		// 8. Build and sign attestation
 

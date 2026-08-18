@@ -1,0 +1,644 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Midas Attestation Engine — Console</title>
+<style>
+:root {
+	--bg: #0b0d10;
+	--bg-elev: #14181d;
+	--bg-elev2: #1b2027;
+	--border: #2a313a;
+	--text: #e6edf3;
+	--text-dim: #8b97a6;
+	--accent: #7ee2c6;
+	--accent-warm: #f5c879;
+	--danger: #ff7a7a;
+	--ok: #7ee2a8;
+	--mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+body {
+	margin: 0;
+	font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+	background: var(--bg);
+	color: var(--text);
+	line-height: 1.5;
+	min-height: 100vh;
+}
+.wrap { max-width: 1200px; margin: 0 auto; padding: 40px 24px 80px; }
+h1 { font-weight: 600; font-size: 26px; margin: 0 0 6px; }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-dim); margin: 24px 0 12px; font-weight: 600; }
+.tag { color: var(--text-dim); font-size: 14px; margin-bottom: 24px; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+.card { background: var(--bg-elev); border: 1px solid var(--border); border-radius: 10px; padding: 20px 24px; }
+label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
+input, textarea, select {
+	width: 100%;
+	background: var(--bg);
+	border: 1px solid var(--border);
+	color: var(--text);
+	font-family: var(--mono);
+	font-size: 13px;
+	padding: 8px 12px;
+	border-radius: 6px;
+	outline: none;
+	margin-bottom: 12px;
+}
+input:focus, textarea:focus, select:focus { border-color: var(--accent); }
+textarea { min-height: 280px; }
+button {
+	background: var(--accent);
+	color: #0b0d10;
+	border: none;
+	padding: 10px 20px;
+	font-weight: 600;
+	font-size: 14px;
+	border-radius: 6px;
+	cursor: pointer;
+	font-family: inherit;
+	margin-right: 8px;
+	margin-bottom: 8px;
+}
+button:hover { filter: brightness(1.1); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+button.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
+.status { padding: 12px 16px; border-radius: 8px; margin: 12px 0; font-size: 13px; font-family: var(--mono); word-break: break-all; }
+.status.error { background: rgba(255, 122, 122, 0.1); border: 1px solid var(--danger); color: var(--danger); }
+.status.info { background: var(--bg-elev2); border: 1px solid var(--border); color: var(--text-dim); }
+.status.ok { background: rgba(126, 226, 168, 0.1); border: 1px solid var(--ok); color: var(--ok); }
+pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; font-size: 12px; overflow-x: auto; word-break: break-all; white-space: pre-wrap; }
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.tokenselect { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+.tokenselect button { padding: 6px 12px; font-size: 12px; }
+.tokenselect button.active { background: var(--accent); color: #0b0d10; }
+.tokenselect button:not(.active) { background: var(--bg); color: var(--text-dim); border: 1px solid var(--border); }
+.kv { display: grid; grid-template-columns: 220px 1fr; gap: 6px 18px; font-size: 13px; margin-bottom: 4px; }
+.kv .k { color: var(--text-dim); }
+.kv .v { font-family: var(--mono); word-break: break-all; }
+details { margin: 12px 0; }
+details summary { cursor: pointer; color: var(--text-dim); font-size: 12px; }
+.hint { font-size: 11px; color: var(--text-dim); margin-top: -4px; margin-bottom: 12px; }
+.tabs { display: flex; gap: 4px; margin-bottom: 24px; border-bottom: 1px solid var(--border); }
+.tabs button { background: transparent; color: var(--text-dim); border: none; border-bottom: 2px solid transparent; border-radius: 0; margin: 0; padding: 10px 18px; }
+.tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
+.tabpane { display: none; }
+.tabpane.active { display: block; }
+.step { border: 1px solid var(--border); border-radius: 8px; padding: 16px 18px; margin-bottom: 14px; background: var(--bg-elev2); }
+.step h3 { margin: 0 0 4px; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+.step .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); display: inline-block; }
+.step.done .dot { background: var(--ok); }
+.step.todo .dot { background: var(--accent-warm); }
+.pill { font-size: 10px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; }
+.pill.ok { color: var(--ok); border-color: var(--ok); }
+.pill.todo { color: var(--accent-warm); border-color: var(--accent-warm); }
+</style>
+</head>
+<body>
+<div class="wrap">
+	<h1>Midas Attestation Engine — Console</h1>
+	<p class="tag">Onboard a token to the SAVE registry (proof, claim provider, attestor, verifiers) and push ops claims. All txs are wallet-signed (Fordefi / MetaMask).</p>
+
+	<div style="display:flex; gap:12px; align-items:center; margin-bottom:16px; flex-wrap:wrap;">
+		<select id="network" style="max-width: 300px; margin:0;">
+			<option value="mainnet">Ethereum Mainnet (prod registry)</option>
+			<option value="sepolia" selected>Sepolia (test registry)</option>
+		</select>
+		<button id="connectWallet" style="margin:0;">Connect wallet</button>
+		<span id="walletAddr" class="tag" style="margin:0; font-family:var(--mono); font-size:12px;"></span>
+	</div>
+
+	<div class="tokenselect" id="tokenSelect"></div>
+	<label>Token name (any mToken; proof name = lowercase + "-por")</label>
+	<input id="f_token" value="mFONE" style="max-width:320px;">
+
+	<div class="tabs">
+		<button class="active" data-tab="onboard">Onboard token</button>
+		<button data-tab="claim">Push ops claim</button>
+	</div>
+
+	<!-- ============ ONBOARD TAB ============ -->
+	<div class="tabpane active" id="tab-onboard">
+		<div class="card">
+			<h2>Registry state for this token</h2>
+			<div id="statusPanel"><div class="hint">Connect wallet or pick a network, then click Refresh.</div></div>
+			<button id="refreshStatus" class="secondary">Refresh on-chain status</button>
+		</div>
+
+		<div class="card" style="margin-top:24px;">
+			<h2>Onboarding steps (owner-only: <span id="ownerHint" class="v" style="font-family:var(--mono)"></span>)</h2>
+			<div class="hint">Run in order. Each is idempotent-ish: re-running a completed step reverts on-chain (already exists), so use the status panel above to see what's left. "Simulate" does an eth_call first.</div>
+
+			<div class="step todo" id="step-addProof">
+				<h3><span class="dot"></span> 1. addProof <span class="pill todo" id="pill-addProof">todo</span></h3>
+				<div class="hint">Registers the proofId. proofName is derived from the token name, format = 0.</div>
+				<div class="kv"><div class="k">proofName</div><div class="v" id="v-proofName"></div></div>
+				<div class="kv"><div class="k">proofId (sha256)</div><div class="v" id="v-proofId"></div></div>
+				<div class="kv"><div class="k">format</div><div class="v">0</div></div>
+				<button class="secondary" data-sim="addProof">Simulate</button>
+				<button data-send="addProof">Send addProof</button>
+				<div id="st-addProof"></div>
+			</div>
+
+			<div class="step todo" id="step-authProvider">
+				<h3><span class="dot"></span> 2. authorizeClaimProvider <span class="pill todo" id="pill-authProvider">todo</span></h3>
+				<div class="hint">Authorizes the ops address to push ops claims for this proof.</div>
+				<div class="kv"><div class="k">claimTypeName</div><div class="v">midas-ops-claim</div></div>
+				<label>claimProvider (ops address)</label>
+				<input id="f_opsProvider">
+				<button class="secondary" data-sim="authProvider">Simulate</button>
+				<button data-send="authProvider">Send authorizeClaimProvider</button>
+				<div id="st-authProvider"></div>
+			</div>
+
+			<div class="step todo" id="step-authVlayer">
+				<h3><span class="dot"></span> 2b. authorizeClaimProvider (vlayer / fund manager) <span class="pill todo" id="pill-authVlayer">todo</span></h3>
+				<div class="hint">Off-chain tokens only. Authorizes the vlayer address to push the notarized fund-manager valuation claim.</div>
+				<div class="kv"><div class="k">claimTypeName</div><div class="v">fund_manager_claim</div></div>
+				<label>claimProvider (vlayer address)</label>
+				<input id="f_vlayerProvider">
+				<button class="secondary" data-sim="authVlayer">Simulate</button>
+				<button data-send="authVlayer">Send authorizeClaimProvider</button>
+				<div id="st-authVlayer"></div>
+			</div>
+
+			<div class="step todo" id="step-setAttestor">
+				<h3><span class="dot"></span> 3. setAttestor <span class="pill todo" id="pill-setAttestor">todo</span></h3>
+				<div class="hint">Sets the CRE attester workflow address allowed to write attestations.</div>
+				<label>attestor</label>
+				<input id="f_attestor">
+				<button class="secondary" data-sim="setAttestor">Simulate</button>
+				<button data-send="setAttestor">Send setAttestor</button>
+				<div id="st-setAttestor"></div>
+			</div>
+
+			<div class="step todo" id="step-authVerifiers">
+				<h3><span class="dot"></span> 4. authorizeVerifiers <span class="pill todo" id="pill-authVerifiers">todo</span></h3>
+				<div class="hint">Sets the CRE verifier workflow address(es). Comma-separate for multiple.</div>
+				<label>verifiers (comma-separated addresses)</label>
+				<input id="f_verifiers">
+				<div id="verifiersParsed" class="hint"></div>
+				<button class="secondary" data-sim="authVerifiers">Simulate</button>
+				<button data-send="authVerifiers">Send authorizeVerifiers</button>
+				<div id="st-authVerifiers"></div>
+			</div>
+
+			<div style="margin-top:16px;">
+				<button id="runAll">Run all remaining steps</button>
+				<span class="hint" style="margin-left:8px;">Sends each pending step in sequence, waiting for confirmation between txs.</span>
+			</div>
+			<div id="st-runAll"></div>
+		</div>
+	</div>
+
+	<!-- ============ CLAIM TAB ============ -->
+	<div class="tabpane" id="tab-claim">
+		<div class="grid">
+			<div class="card">
+				<h2>Ops claim fields</h2>
+				<label>createdAt (ISO)</label>
+				<input id="f_createdAt">
+				<div class="hint">Defaults to now.</div>
+				<label>navReportedByOps (USD, 2dp — NET, used in ratio)</label>
+				<input id="f_navReportedByOps" placeholder="63765050.85">
+				<label>navReportedByOpsGross (USD, 2dp — GROSS, displayed)</label>
+				<input id="f_navReportedByOpsGross" placeholder="72978078.61">
+				<div class="hint">Off-chain fund NAV + on-chain TVL Midas holds. No pending subtraction.</div>
+				<label>totalSupplyCrossChainReportedByOps (wei, 18dp)</label>
+				<input id="f_totalSupply" placeholder="57801273560000000000000000">
+				<label>tokenPriceReportedByOps (USD, 8dp)</label>
+				<input id="f_tokenPrice" placeholder="1.10317726">
+				<label>oracleAddress</label>
+				<input id="f_oracleAddress">
+				<label>oracleChainSelectorName</label>
+				<input id="f_oracleChain" value="ethereum-mainnet">
+				<label>priceUpdateTxHash</label>
+				<input id="f_priceUpdateTx">
+				<label>priceUpdateChainId</label>
+				<input id="f_priceChainId" value="1">
+				<label>vlayerClaimHash (0x0 or bytes32)</label>
+				<input id="f_vlayerHash" value="0x0000000000000000000000000000000000000000000000000000000000000000">
+			</div>
+			<div class="card">
+				<h2>Preview JSON</h2>
+				<textarea id="jsonPreview" readonly></textarea>
+				<h2>Pinata upload</h2>
+				<label>Pinata JWT (in-memory only)</label>
+				<input id="pinataJwt" type="password" placeholder="eyJhbGci...">
+				<button id="upload">Upload to IPFS + compute claimHash</button>
+				<button id="downloadGz" class="secondary">Download .json.gz</button>
+				<div id="uploadStatus"></div>
+				<h2>Transaction to sign</h2>
+				<div id="txDetails"><div class="hint">Upload first to compute claimHash.</div></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<script type="module">
+import { ethers } from 'https://esm.sh/ethers@6.13.0'
+
+// ---------- constants ----------
+const REGISTRY = {
+	mainnet: '0x2D6e9F608807436DE5D9603B00Abe3FEd1Bc809d',
+	sepolia: '0x4AbE1936AEc4aAC8177eC65e437A1f8726Bc7F10',
+}
+const OWNER = {
+	mainnet: '0x8003544D32eE074aA8A1fb72129Fa8Ef7fe02E5f',
+	sepolia: '0x0ED593ba541e12f9273b02205540d7719e781d21',
+}
+const OPS_PROVIDER = {
+	mainnet: '0x8003544d32ee074aa8a1fb72129fa8ef7fe02e5f',
+	sepolia: '0x0ED593ba541e12f9273b02205540d7719e781d21',
+}
+const ATTESTOR = {
+	mainnet: '0x230f0b2e321d0E32eA50696710a98Ca84503A391',
+	sepolia: '0x2D61a2a3d95ec455Bcf58B439ee1cF1904fD3fF9',
+}
+const VERIFIER = {
+	mainnet: '0x230f0b2e321d0E32eA50696710a98Ca84503A391,0xF16C8E4e88979B3F14f4314b0EEBC5172B6786DD',
+	sepolia: '0x0ED593ba541e12f9273b02205540d7719e781d21',
+}
+const RPC = {
+	mainnet: 'https://ethereum-rpc.publicnode.com',
+	sepolia: 'https://ethereum-sepolia-rpc.publicnode.com',
+}
+const CHAIN_HEX = { mainnet: '0x1', sepolia: '0xaa36a7' }
+const EXPLORER = { mainnet: 'https://etherscan.io', sepolia: 'https://sepolia.etherscan.io' }
+const PROOF_FORMAT = 0
+const OPS_CLAIM_TYPE_NAME = 'midas-ops-claim'
+const FUND_MANAGER_CLAIM_TYPE = 'fund_manager_claim'
+const VLAYER_PROVIDER = {
+	mainnet: '0xc02415cB203F4c3Cc41B0A3430BEb6BE767A1E9A',
+	sepolia: '',
+}
+// off-chain (fund-manager / vlayer) tokens: need the extra fund_manager_claim provider
+const OFFCHAIN = new Set(['mFONE','mGLOBAL','mGLO','mGLOeuro','mM1-USD','mRe7YIELD','mRe7BTC','mRe7ETH','mWIN'])
+
+// All Midas mTokens (buttons). Off-chain ones are marked; the rest are on-chain/CEX (1token).
+const TOKENS = [
+	'mFONE','mGLOBAL','mGLO','mGLOeuro','mM1-USD','mHYPER','mHyperBTC','mM1BTC',
+	'mTBILL','mBASIS','mEDGE','mRe7YIELD','mRe7BTC','mRe7ETH','mSL',
+	'mLIQUIDITY','mROX','mWIN','mAPOLLO',
+]
+// proofName override where the canonical differs from the default derivation
+const PROOF_NAME_OVERRIDE = { 'mM1-USD': 'mm1usd-por' }
+
+// token address + Chainlink customFeed (PoR oracle), mainnet — from midas-apps/contracts addresses.ts
+const TOKEN_META = {
+	mFONE:      { token: '0x238a700eD6165261Cf8b2e544ba797BC11e466Ba', oracle: '0x8D51DBC85cEef637c97D02bdaAbb5E274850e68C' },
+	mGLOBAL:    { token: '0x7433806912Eae67919e66aea853d46Fa0aef98A8', oracle: '' },
+	mGLO:       { token: '0x1DD91a111606382B77A917633ED90feAf25E0F76', oracle: '0x59313b6ae481e39B8E7710C8C26dC0ada3C532Ca' },
+	mGLOeuro:   { token: '0x2F8bae126b8d416C009b82Ccd60e4f9cAbbd7702', oracle: '0x8B7B1689396ef4468df1c0faB181D29B47089609' },
+	'mM1-USD':  { token: '0xCc5C22C7A6BCC25e66726AeF011dDE74289ED203', oracle: '0xad316aA927c0970C2e8f0B903211D0bd19A10702' },
+	mHYPER:     { token: '0x9b5528528656DBC094765E2abB79F293c21191B9', oracle: '0x43881B05C3BE68B2d33eb70aDdF9F666C5005f68' },
+	mHyperBTC:  { token: '0xC8495EAFf71D3A563b906295fCF2f685b1783085', oracle: '0x3359921992C33ef23169193a6C91F2944A82517C' },
+	mM1BTC:     { token: '0xc57c754f51DbbFae1a12b1aD1b8a8587bf24260a', oracle: '0x0066B0Cf5d7185cC30345AAAe258568f564b46d1' },
+	mTBILL:     { token: '0xDD629E5241CbC5919847783e6C96B2De4754e438', oracle: '0x056339C044055819E8Db84E71f5f2E1F536b2E5b' },
+	mBASIS:     { token: '0x2a8c22E3b10036f3AEF5875d04f8441d4188b656', oracle: '0xE4f2AE539442e1D3Fb40F03ceEbF4A372a390d24' },
+	mEDGE:      { token: '0xbB51E2a15A9158EBE2b0Ceb8678511e063AB7a55', oracle: '0x698dA5D987a71b68EbF30C1555cfd38F190406b7' },
+	mRe7YIELD:  { token: '0x87C9053C819bB28e0D73d33059E1b3DA80AFb0cf', oracle: '0x0a2a51f2f206447dE3E3a80FCf92240244722395' },
+	mRe7BTC:    { token: '0x9FB442d6B612a6dcD2acC67bb53771eF1D9F661A', oracle: '0x9de073685AEb382B7c6Dd0FB93fa0AEF80eB8967' },
+	mRe7ETH:    { token: '0xE7Ba07519dFA06e60059563F484d6090dedF21B3', oracle: '0xcFfe26979e96B9E0454cC83aa03FC973C9Eb0E5E', chain: 'optimism' }, // Optimism-only (customFeed = PoR oracle)
+	mSL:        { token: '0x76CC16608aA7Cd32631bb151801bb095313F7bbd', oracle: '0x12570b84b633629b1DB532fD3420F34a30ACfc68' },
+	mLIQUIDITY: { token: '0x841EEb3e2489B2282b0E14202Dc8Bd8F7624e29A', oracle: '0x74508886cDFEF22FddEDcA0d9Caf9E00E876C5aF' },
+	mROX:       { token: '0x67E1F506B148d0Fc95a4E3fFb49068ceB6855c05', oracle: '0x7fF56C3a31476c231e74E4F64e9d9718572B54Aa' },
+	mWIN:       { token: '0x4E72025984424E52838cf8953E2863eFf036B67A', oracle: '0x1725A66D810C0775f6B3B0FD85646D371dA19517' },
+	mAPOLLO:    { token: '0x7CF9DEC92ca9FD46f8d86e7798B72624Bc116C05', oracle: '0x84303e5568C7B167fa4fEBc6253CDdfe12b7Ee4B' },
+}
+
+const ABI = [
+	'function addProof(string proofName, uint8 format)',
+	'function authorizeClaimProvider(bytes32 proofId, string claimTypeName, address claimProvider)',
+	'function setAttestor(bytes32 proofId, address attestor)',
+	'function authorizeVerifiers(bytes32 proofId, address[] verifiers)',
+	'function addClaim(bytes32 proofId, bytes32 claimHash, bytes32 claimTypeId)',
+	'function proofExists(bytes32 proofId) view returns (bool)',
+	'function proofIdToAuthorizedAttestor(bytes32) view returns (address)',
+	'function proofIdToAuthorizedVerifiers(bytes32, uint256) view returns (address)',
+	'function authorizedClaimProviders(bytes32, bytes32, address) view returns (bool)',
+	'function proofIdToName(bytes32) view returns (string)',
+	'function owner() view returns (address)',
+]
+const iface = new ethers.Interface(ABI)
+
+// ---------- helpers ----------
+const $ = id => document.getElementById(id)
+const net = () => $('network').value
+function setStatus(el, kind, html) { el.innerHTML = html ? `<div class="status ${kind}">${html}</div>` : '' }
+
+async function sha256Hex(str) {
+	const enc = new TextEncoder().encode(str)
+	const hash = await crypto.subtle.digest('SHA-256', enc)
+	return '0x' + Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('')
+}
+function proofName(token) {
+	return PROOF_NAME_OVERRIDE[token] || (token.toLowerCase().replace(/[^a-z0-9]/g, '') + '-por')
+}
+const computeProofId = token => sha256Hex(proofName(token))
+const computeClaimTypeId = () => sha256Hex(OPS_CLAIM_TYPE_NAME)
+
+function readProvider() { return new ethers.JsonRpcProvider(RPC[net()]) }
+
+async function ensureChain() {
+	if (!window.ethereum) throw new Error('No injected wallet (Fordefi / MetaMask).')
+	try {
+		await window.ethereum.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: CHAIN_HEX[net()] }] })
+	} catch (e) { if (e.code === 4902) throw new Error('Add the chain to your wallet first.') }
+	const [from] = await window.ethereum.request({ method: 'eth_requestAccounts' })
+	return from
+}
+
+// Build calldata for an admin action given the current token/network
+async function buildAdminCall(action) {
+	const token = $('f_token').value.trim()
+	const proofId = await computeProofId(token)
+	switch (action) {
+		case 'addProof':
+			return iface.encodeFunctionData('addProof', [proofName(token), PROOF_FORMAT])
+		case 'authProvider':
+			return iface.encodeFunctionData('authorizeClaimProvider', [proofId, OPS_CLAIM_TYPE_NAME, $('f_opsProvider').value.trim()])
+		case 'authVlayer':
+			return iface.encodeFunctionData('authorizeClaimProvider', [proofId, FUND_MANAGER_CLAIM_TYPE, $('f_vlayerProvider').value.trim()])
+		case 'setAttestor':
+			return iface.encodeFunctionData('setAttestor', [proofId, $('f_attestor').value.trim()])
+		case 'authVerifiers':
+			return iface.encodeFunctionData('authorizeVerifiers', [proofId, $('f_verifiers').value.split(',').map(s => s.trim()).filter(Boolean)])
+	}
+}
+const CAST_SIG = {
+	addProof: 'addProof(string,uint8)',
+	authProvider: 'authorizeClaimProvider(bytes32,string,address)',
+	authVlayer: 'authorizeClaimProvider(bytes32,string,address)',
+	setAttestor: 'setAttestor(bytes32,address)',
+	authVerifiers: 'authorizeVerifiers(bytes32,address[])',
+}
+async function castCmd(action) {
+	const token = $('f_token').value.trim()
+	const reg = REGISTRY[net()], proofId = await computeProofId(token)
+	const rpc = RPC[net()]
+	let args
+	switch (action) {
+		case 'addProof': args = `"${proofName(token)}" 0`; break
+		case 'authProvider': args = `${proofId} "midas-ops-claim" ${$('f_opsProvider').value.trim()}`; break
+		case 'authVlayer': args = `${proofId} "fund_manager_claim" ${$('f_vlayerProvider').value.trim()}`; break
+		case 'setAttestor': args = `${proofId} ${$('f_attestor').value.trim()}`; break
+		case 'authVerifiers': args = `${proofId} "[${$('f_verifiers').value.split(',').map(s=>s.trim()).filter(Boolean).join(',')}]"`; break
+	}
+	return `cast send ${reg} "${CAST_SIG[action]}" ${args} --rpc-url ${rpc} --private-key <OWNER_KEY>`
+}
+
+async function simulate(action, stEl) {
+	setStatus(stEl, 'info', 'Simulating (eth_call)…')
+	try {
+		const data = await buildAdminCall(action)
+		const from = OWNER[net()] // owner-gated fns; simulate as owner
+		await readProvider().call({ to: REGISTRY[net()], data, from })
+		setStatus(stEl, 'ok', 'Simulation passed ✓ (would succeed from owner). ' +
+			`<details><summary>cast</summary><pre>${await castCmd(action)}</pre></details>`)
+	} catch (e) {
+		const reason = e.shortMessage || e.reason || e.message
+		setStatus(stEl, 'error', 'Simulation reverted: ' + reason)
+	}
+}
+
+async function send(action, stEl) {
+	try {
+		const from = await ensureChain()
+		const data = await buildAdminCall(action)
+		setStatus(stEl, 'info', `Sending from ${from}…`)
+		const txHash = await window.ethereum.request({
+			method: 'eth_sendTransaction',
+			params: [{ from, to: REGISTRY[net()], data, value: '0x0' }],
+		})
+		setStatus(stEl, 'ok', `Tx sent ✓ <a href="${EXPLORER[net()]}/tx/${txHash}" target="_blank" style="color:inherit;text-decoration:underline">${txHash}</a>`)
+		await readProvider().waitForTransaction(txHash, 1)
+		refreshStatus()
+		return txHash
+	} catch (e) {
+		setStatus(stEl, 'error', 'Tx failed: ' + (e.shortMessage || e.message || e))
+		throw e
+	}
+}
+
+// ---------- status panel ----------
+async function refreshStatus() {
+	const token = $('f_token').value.trim()
+	const proofId = await computeProofId(token)
+	$('v-proofName').textContent = proofName(token)
+	$('v-proofId').textContent = proofId
+	$('ownerHint').textContent = OWNER[net()]
+	const p = readProvider()
+	const c = new ethers.Contract(REGISTRY[net()], ABI, p)
+	const claimTypeId = await computeClaimTypeId()
+	const panel = $('statusPanel')
+	panel.innerHTML = '<div class="hint">Reading on-chain…</div>'
+	const mark = (ok) => `<span class="pill ${ok ? 'ok' : 'todo'}">${ok ? 'done' : 'todo'}</span>`
+	try {
+		const isOff = OFFCHAIN.has(token)
+		toggleVlayerStep()
+		const fmClaimTypeId = await sha256Hex(FUND_MANAGER_CLAIM_TYPE)
+		const exists = await c.proofExists(proofId).catch(() => false)
+		let attestor = ethers.ZeroAddress, verifier = ethers.ZeroAddress, providerOk = false, vlayerOk = false
+		if (exists) {
+			attestor = await c.proofIdToAuthorizedAttestor(proofId).catch(() => ethers.ZeroAddress)
+			verifier = await c.proofIdToAuthorizedVerifiers(proofId, 0).catch(() => ethers.ZeroAddress)
+			providerOk = await c.authorizedClaimProviders(proofId, claimTypeId, OPS_PROVIDER[net()]).catch(() => false)
+			if (isOff) vlayerOk = await c.authorizedClaimProviders(proofId, fmClaimTypeId, VLAYER_PROVIDER[net()]).catch(() => false)
+		}
+		const attestorOk = attestor !== ethers.ZeroAddress
+		const verifierOk = verifier !== ethers.ZeroAddress
+		panel.innerHTML = `
+			<div class="kv"><div class="k">proofExists</div><div class="v">${mark(exists)} ${exists}</div></div>
+			<div class="kv"><div class="k">ops claim provider</div><div class="v">${mark(providerOk)} ${providerOk}</div></div>
+			${isOff ? `<div class="kv"><div class="k">vlayer claim provider</div><div class="v">${mark(vlayerOk)} ${vlayerOk}</div></div>` : ''}
+			<div class="kv"><div class="k">attestor</div><div class="v">${mark(attestorOk)} ${attestor}</div></div>
+			<div class="kv"><div class="k">verifier[0]</div><div class="v">${mark(verifierOk)} ${verifier}</div></div>`
+		setPill('addProof', exists); setPill('authProvider', providerOk); setPill('authVlayer', vlayerOk)
+		setPill('setAttestor', attestorOk); setPill('authVerifiers', verifierOk)
+	} catch (e) {
+		panel.innerHTML = `<div class="status error">Status read failed: ${e.message}</div>`
+	}
+}
+function setPill(action, done) {
+	const pill = $('pill-' + action), step = $('step-' + action)
+	if (!pill) return
+	pill.textContent = done ? 'done' : 'todo'
+	pill.className = 'pill ' + (done ? 'ok' : 'todo')
+	step.className = 'step ' + (done ? 'done' : 'todo')
+}
+
+// ---------- token buttons + defaults ----------
+function renderTokens() {
+	const el = $('tokenSelect')
+	el.innerHTML = ''
+	TOKENS.forEach((t, i) => {
+		const b = document.createElement('button')
+		b.textContent = t
+		b.dataset.token = t
+		if (i === 0) b.classList.add('active')
+		b.onclick = () => {
+			document.querySelectorAll('#tokenSelect button').forEach(x => x.classList.remove('active'))
+			b.classList.add('active')
+			$('f_token').value = t
+			applyNetworkDefaults()
+			if (net() === 'mainnet' && TOKEN_META[t]?.oracle) $('f_oracleAddress').value = TOKEN_META[t].oracle
+			refreshStatus()
+			refreshClaimPreview()
+		}
+		el.appendChild(b)
+	})
+}
+function updateVerifiersParsed() {
+	const list = $('f_verifiers').value.split(',').map(s => s.trim()).filter(Boolean)
+	$('verifiersParsed').textContent = `${list.length} verifier(s) will be authorized: ${list.join('  ·  ')}`
+}
+function applyNetworkDefaults() {
+	$('f_opsProvider').value = OPS_PROVIDER[net()]
+	$('f_vlayerProvider').value = VLAYER_PROVIDER[net()]
+	$('f_attestor').value = ATTESTOR[net()]
+	$('f_verifiers').value = VERIFIER[net()]
+	$('f_oracleChain').value = net() === 'sepolia' ? 'ethereum-testnet-sepolia' : 'ethereum-mainnet'
+	$('f_priceChainId').value = net() === 'sepolia' ? 11155111 : 1
+	updateVerifiersParsed()
+}
+// show the vlayer-provider step only for off-chain tokens
+function toggleVlayerStep() {
+	$('step-authVlayer').style.display = OFFCHAIN.has($('f_token').value.trim()) ? '' : 'none'
+}
+
+// ---------- wire admin buttons ----------
+document.querySelectorAll('[data-sim]').forEach(b => b.onclick = () => simulate(b.dataset.sim, $('st-' + b.dataset.sim)))
+document.querySelectorAll('[data-send]').forEach(b => b.onclick = () => send(b.dataset.send, $('st-' + b.dataset.send)))
+$('refreshStatus').onclick = refreshStatus
+$('runAll').onclick = async () => {
+	const order = OFFCHAIN.has($('f_token').value.trim())
+		? ['addProof', 'authProvider', 'authVlayer', 'setAttestor', 'authVerifiers']
+		: ['addProof', 'authProvider', 'setAttestor', 'authVerifiers']
+	const st = $('st-runAll')
+	for (const a of order) {
+		const pill = $('pill-' + a)
+		if (pill.textContent === 'done') { setStatus(st, 'info', `${a}: already done, skipping.`); continue }
+		setStatus(st, 'info', `Running ${a}…`)
+		try { await send(a, $('st-' + a)) } catch { setStatus(st, 'error', `Stopped at ${a}.`); return }
+	}
+	setStatus(st, 'ok', 'All steps done ✓')
+}
+
+// ---------- tabs ----------
+document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
+	document.querySelectorAll('.tabs button').forEach(x => x.classList.remove('active'))
+	document.querySelectorAll('.tabpane').forEach(x => x.classList.remove('active'))
+	b.classList.add('active')
+	$('tab-' + b.dataset.tab).classList.add('active')
+})
+
+// ---------- network change ----------
+$('network').onchange = () => { applyNetworkDefaults(); refreshStatus() }
+$('f_verifiers').oninput = updateVerifiersParsed
+$('f_token').oninput = () => { refreshStatus(); refreshClaimPreview() }
+
+// ---------- wallet ----------
+$('connectWallet').onclick = async () => {
+	if (!window.ethereum) return alert('No injected wallet.')
+	try { const [a] = await window.ethereum.request({ method: 'eth_requestAccounts' }); $('walletAddr').textContent = a }
+	catch (e) { alert('Connect failed: ' + e.message) }
+}
+
+// ================= CLAIM TAB (ports the original push-ops-claim flow) =================
+const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+function base58Decode(str) {
+	const bytes = []
+	for (const c of str) {
+		const val = BASE58.indexOf(c); if (val < 0) throw new Error('bad base58')
+		let carry = val
+		for (let j = 0; j < bytes.length; j++) { carry += bytes[j] * 58; bytes[j] = carry & 0xff; carry >>= 8 }
+		while (carry > 0) { bytes.push(carry & 0xff); carry >>= 8 }
+	}
+	for (const c of str) { if (c === '1') bytes.push(0); else break }
+	return new Uint8Array(bytes.reverse())
+}
+function cidToHash(cid) {
+	const b = base58Decode(cid)
+	if (b.length < 34 || b[0] !== 0x12 || b[1] !== 0x20) throw new Error('Not CIDv0 SHA-256')
+	return '0x' + Array.from(b.slice(2, 34)).map(x => x.toString(16).padStart(2, '0')).join('')
+}
+async function gzipJson(obj) {
+	const cs = new CompressionStream('gzip')
+	const stream = new Blob([JSON.stringify(obj)]).stream().pipeThrough(cs)
+	return new Uint8Array(await new Response(stream).arrayBuffer())
+}
+function buildClaim() {
+	const claim = {
+		token: $('f_token').value.trim(),
+		createdAt: $('f_createdAt').value.trim() || new Date().toISOString(),
+		priceUpdateTxHash: $('f_priceUpdateTx').value.trim(),
+		priceUpdateChainId: Number($('f_priceChainId').value) || 1,
+		totalSupplyCrossChainReportedByOps: $('f_totalSupply').value.trim(),
+		navReportedByOps: $('f_navReportedByOps').value.trim(),
+		tokenPriceReportedByOps: $('f_tokenPrice').value.trim(),
+		oracleAddress: $('f_oracleAddress').value.trim(),
+		oracleChainSelectorName: $('f_oracleChain').value.trim(),
+		vlayerClaimHash: $('f_vlayerHash').value.trim() || '0x' + '0'.repeat(64),
+	}
+	const gross = $('f_navReportedByOpsGross').value.trim()
+	if (gross) claim.navReportedByOpsGross = gross
+	return claim
+}
+function refreshClaimPreview() { $('jsonPreview').value = JSON.stringify(buildClaim(), null, 2) }
+document.querySelectorAll('#tab-claim input').forEach(el => el.oninput = refreshClaimPreview)
+$('f_createdAt').value = new Date().toISOString()
+
+$('upload').onclick = async () => {
+	const claim = buildClaim(), jwt = $('pinataJwt').value.trim(), statusEl = $('uploadStatus')
+	if (!jwt) return setStatus(statusEl, 'error', 'Paste your Pinata JWT.')
+	setStatus(statusEl, 'info', 'Gzipping + uploading…')
+	try {
+		const gz = await gzipJson(claim)
+		const filename = `ops_claim_${claim.token}_${claim.createdAt.slice(0, 10)}.json.gz`
+		const form = new FormData()
+		form.append('file', new Blob([gz], { type: 'application/gzip' }), filename)
+		form.append('pinataMetadata', JSON.stringify({ name: filename }))
+		const res = await fetch('https://api.pinata.cloud/pinning/pinFileToIPFS', { method: 'POST', headers: { Authorization: `Bearer ${jwt}` }, body: form })
+		const j = await res.json()
+		if (!res.ok || !j.IpfsHash) throw new Error(j.error?.reason || res.statusText)
+		const cid = j.IpfsHash, claimHash = cidToHash(cid)
+		const proofId = await computeProofId(claim.token), claimTypeId = await computeClaimTypeId()
+		const data = iface.encodeFunctionData('addClaim', [proofId, claimHash, claimTypeId])
+		const reg = REGISTRY[net()]
+		setStatus(statusEl, 'ok', `Uploaded ✓ CID ${cid}`)
+		$('txDetails').innerHTML = `
+			<div class="kv"><div class="k">proofId</div><div class="v">${proofId}</div></div>
+			<div class="kv"><div class="k">claimHash</div><div class="v">${claimHash}</div></div>
+			<div class="kv"><div class="k">claimTypeId</div><div class="v">${claimTypeId}</div></div>
+			<button id="sendClaim">Send addClaim tx</button>
+			<div id="claimTxStatus"></div>
+			<h2>Cast alternative</h2>
+			<pre>cast send ${reg} "addClaim(bytes32,bytes32,bytes32)" ${proofId} ${claimHash} ${claimTypeId} --rpc-url ${RPC[net()]} --private-key &lt;OPS_KEY&gt;</pre>`
+		$('sendClaim').onclick = async () => {
+			const el = $('claimTxStatus')
+			try {
+				const from = await ensureChain()
+				setStatus(el, 'info', `Sending from ${from}…`)
+				const txHash = await window.ethereum.request({ method: 'eth_sendTransaction', params: [{ from, to: reg, data, value: '0x0' }] })
+				setStatus(el, 'ok', `Tx sent ✓ <a href="${EXPLORER[net()]}/tx/${txHash}" target="_blank" style="color:inherit;text-decoration:underline">${txHash}</a>`)
+			} catch (e) { setStatus(el, 'error', 'Tx failed: ' + (e.shortMessage || e.message)) }
+		}
+	} catch (e) { setStatus(statusEl, 'error', 'Upload failed: ' + e.message) }
+}
+$('downloadGz').onclick = async () => {
+	const claim = buildClaim(), gz = await gzipJson(claim)
+	const url = URL.createObjectURL(new Blob([gz], { type: 'application/gzip' }))
+	const a = document.createElement('a'); a.href = url; a.download = `ops_claim_${claim.token}_${claim.createdAt.slice(0,10)}.json.gz`; a.click()
+	URL.revokeObjectURL(url)
+}
+
+// ---------- init ----------
+renderTokens()
+applyNetworkDefaults()
+refreshClaimPreview()
+refreshStatus()
+</script>
+</body>
+</html>

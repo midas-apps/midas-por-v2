@@ -65,9 +65,9 @@ The attestation is a list of independently-sourced claims. Each one tells you wh
 | `ops_claim` | Cross-chain supply and NAV reported by Midas ops | Cross-check against your own chain indexer |
 | `onetoken_report` | Full 1token portfolio breakdown — `assets`, `liabilities`, `equity`, and `_metadata.anchorISO` (the exact snapshot timestamp). Contains per-wallet balances including CEX, custody, OTC | Inspect the wallet list, hit each CEX/custody address directly and confirm the balances |
 | `oracle_price` | Chainlink oracle price + last-updated timestamp | Query the Chainlink aggregator directly |
-| `fund_manager_email` | Vlayer TLS-Notary proof of the NAV email sent by the fund manager (offchain-data tokens only — mFONE, mM1-USD) | Verify the vlayer proof independently with the vlayer SDK; the proof commits to sender domain, receiver, and email body |
+| `fund_manager_email` | Vlayer TLS-Notary proof of the NAV email sent by the fund manager (tokens with a vlayer claim only — see the [Supported Tokens](./README.md#supported-tokens) table) | Verify the vlayer proof independently with the vlayer SDK; the proof commits to sender domain, receiver, and email body |
 | `email_nav` | NAV value extracted from the fund-manager email, listing which lines were summed | Re-extract from the vlayer-proven email body |
-| `overcollateralization` | The computed coverage ratio + which sources were used (`method-1`, `method-2`), threshold, pass/fail | Recompute from the inputs above |
+| `overcollateralization` | The computed coverage ratio, threshold, pass/fail, and the USD reserve / TVL figures | Recompute the ratio from the reserve and supply inputs above |
 
 All `cre_consensus` claims are produced by the Chainlink DON. A claim is only included in the attestation if all DON nodes independently agreed on the value.
 
@@ -96,7 +96,7 @@ For tokens whose NAV depends on data outside the chain:
 
 | Source | Tokens | What it produces | Anchored on-chain via |
 |---|---|---|---|
-| Fund-manager email (vlayer TLS-Notary) | mFONE (Fasanara), mM1-USD (M1 Capital) | Signed NAV + accrued interest / pending redemption lines | `fund_manager_email` + `email_nav` claims |
+| Fund-manager email (vlayer TLS-Notary) | mFONE (Fasanara), mM1-USD (M1 Capital), mGLOBAL / mGLO / mGLOeuro (JTC), mWIN (Northern Trust) | Signed NAV + accrued interest / pending redemption lines | `fund_manager_email` + `email_nav` claims |
 | 1token portfolio API | All tokens | Per-wallet asset breakdown (CEX, custody, OTC), equity, navBase | `onetoken_report` claim |
 | Midas supply endpoint | All tokens | Cross-chain `totalSupply` at the attestation timestamp | `ops_claim` + `onchain_supply` |
 | Chainlink oracle | All tokens with a published price feed | Token price USD | `oracle_price` claim |
