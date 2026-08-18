@@ -67,9 +67,21 @@ export function decompressJson(compressedData: Uint8Array): any {
 // IPFS Fetch Functions
 // ============================================================================
 
+// Public gateways tried after the configured primary. Our dedicated Pinata gateway
+// only serves CIDs pinned to our own account (403 on content pinned elsewhere, e.g.
+// vlayer claim proofs pinned via a different JWT/account). The shared Pinata gateway
+// resolves those (same underlying Pinata infra, no account restriction) and has proven
+// the most reliable fallback in practice; dweb.link/ipfs.io are kept as a last resort
+// for content that isn't on Pinata's network at all.
+const IPFS_FALLBACK_GATEWAYS = [
+	'https://gateway.pinata.cloud',
+	'https://dweb.link',
+	'https://ipfs.io',
+]
+
 /**
  * Fetch raw bytes from IPFS
- * 
+ *
  * @param nodeRuntime - NodeRuntime context for HTTP requests
  * @param ipfsCid - IPFS CID to fetch
  * @returns Raw bytes from IPFS
@@ -78,24 +90,36 @@ export function fetchFromIpfs<T extends IPFSConfig>(
 	nodeRuntime: NodeRuntime<T>,
 	ipfsCid: string
 ): Uint8Array {
-	const baseUrl = nodeRuntime.config.ipfsHttpEndpoint.url
-	const ipfsUrl = `${baseUrl}/ipfs/${ipfsCid}`
+	const primary = nodeRuntime.config.ipfsHttpEndpoint.url
+	const gateways = [primary, ...IPFS_FALLBACK_GATEWAYS.filter((g) => g !== primary)]
 
 	const httpClient = new HTTPClient()
-	const request = {
-		url: ipfsUrl,
-		method: 'GET' as const,
-		headers: {},
-		timeout: '10s',  // 10 second timeout (CRE limit)
+	let lastErr = 'none'
+	for (const base of gateways) {
+		nodeRuntime.log(`fetchFromIpfs: trying ${base}/ipfs/${ipfsCid}`)
+		try {
+			const response = httpClient
+				.sendRequest(nodeRuntime, {
+					url: `${base}/ipfs/${ipfsCid}`,
+					method: 'GET' as const,
+					headers: {},
+					timeout: '10s', // 10s CRE cap per request
+				})
+				.result()
+			if (response.statusCode === 200) {
+				nodeRuntime.log(`fetchFromIpfs: ${base} -> 200 OK (${response.body.length} bytes)`)
+				return response.body
+			}
+			lastErr = `${base} -> HTTP ${response.statusCode}`
+			nodeRuntime.log(`fetchFromIpfs: ${lastErr}`)
+		} catch (e) {
+			// timeout ("context deadline exceeded") or transport error - try next gateway
+			lastErr = `${base} -> ${e instanceof Error ? e.message : String(e)}`
+			nodeRuntime.log(`fetchFromIpfs: ${lastErr}`)
+		}
 	}
 
-	const response = httpClient.sendRequest(nodeRuntime, request).result()
-
-	if (response.statusCode !== 200) {
-		throw new Error(`Failed to fetch from IPFS: ${response.statusCode}`)
-	}
-
-	return response.body
+	throw new Error(`Failed to fetch ${ipfsCid} from IPFS after ${gateways.length} attempts (last: ${lastErr})`)
 }
 
 // ============================================================================

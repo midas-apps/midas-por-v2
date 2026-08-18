@@ -179,7 +179,20 @@ const reserveOnchainWalletsSchema = z.object({
 
 export type ReserveOnchainWallets = z.infer<typeof reserveOnchainWalletsSchema>
 
-const tokenConfigSchema = z.object({
+// Solana (SPL) token. When present, the workflow reads supply from the SPL `mint`
+// (getTokenSupply) and price from the Midas manual `priceFeed` account over `rpcUrl`,
+// instead of the EVM oracle + EVM cross-chain supply. Trigger stays on the EVM registry
+// (ops push the NewClaim there, referencing the Solana price-update tx).
+const solanaConfigSchema = z.object({
+	mint: z.string(),
+	priceFeed: z.string(),
+	rpcUrl: z.string().refine((u) => /^https?:\/\/.+/.test(u), { message: 'Invalid Solana RPC URL' }),
+	maxStalenessSec: z.number().int().positive().default(2592000),
+})
+
+export type SolanaConfig = z.infer<typeof solanaConfigSchema>
+
+export const tokenConfigSchema = z.object({
 	name: z.string(),
 	address: z.string().optional(),  // token contract address (used by external supply endpoint)
 	// Primary chain the token lives on (chain selector name from cre-sdk). Defaults to
@@ -187,6 +200,14 @@ const tokenConfigSchema = z.object({
 	// "ethereum-mainnet-base-1"). Passed to the Midas supply endpoint and any on-chain
 	// read related to this token contract.
 	chainSelectorName: z.string().default('ethereum-mainnet'),
+	// Chainlink feed converting the price oracle's quote currency to USD, for tokens whose
+	// oracle is NOT USD-denominated (mHyperBTC/BTC → BTC/USD feed, mGLOeuro/EUR → EUR/USD feed).
+	// When set, oraclePriceUSD = rawOraclePrice × quoteFeed and the ops NAV (reported in the
+	// oracle's native currency) is likewise scaled, so the whole ratio is USD-denominated.
+	// Absent → oracle already USD.
+	oracleQuoteFeed: z.string().optional(),
+	// Solana (SPL) token: read supply + price from Solana instead of the EVM oracle/supply.
+	solana: solanaConfigSchema.optional(),
 	fundManager: fundManagerConfigSchema.optional(),
 	// Second vlayer email (in-flight flows: invest/redeem pending, liquidity
 	// requested). When present, ops includes `vlayerInflightHash` in ops_claim

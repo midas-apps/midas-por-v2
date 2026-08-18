@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Midas PoR — Push Ops Claim</title>
+<style>
+:root {
+	--bg: #0b0d10;
+	--bg-elev: #14181d;
+	--bg-elev2: #1b2027;
+	--border: #2a313a;
+	--text: #e6edf3;
+	--text-dim: #8b97a6;
+	--accent: #7ee2c6;
+	--accent-warm: #f5c879;
+	--danger: #ff7a7a;
+	--ok: #7ee2a8;
+	--mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+body {
+	margin: 0;
+	font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+	background: var(--bg);
+	color: var(--text);
+	line-height: 1.5;
+	min-height: 100vh;
+}
+.wrap { max-width: 1200px; margin: 0 auto; padding: 40px 24px 80px; }
+h1 { font-weight: 600; font-size: 26px; margin: 0 0 6px; }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-dim); margin: 24px 0 12px; font-weight: 600; }
+.tag { color: var(--text-dim); font-size: 14px; margin-bottom: 24px; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+.card { background: var(--bg-elev); border: 1px solid var(--border); border-radius: 10px; padding: 20px 24px; }
+label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
+input, textarea, select {
+	width: 100%;
+	background: var(--bg);
+	border: 1px solid var(--border);
+	color: var(--text);
+	font-family: var(--mono);
+	font-size: 13px;
+	padding: 8px 12px;
+	border-radius: 6px;
+	outline: none;
+	margin-bottom: 12px;
+}
+input:focus, textarea:focus, select:focus { border-color: var(--accent); }
+textarea { min-height: 280px; }
+button {
+	background: var(--accent);
+	color: #0b0d10;
+	border: none;
+	padding: 10px 20px;
+	font-weight: 600;
+	font-size: 14px;
+	border-radius: 6px;
+	cursor: pointer;
+	font-family: inherit;
+	margin-right: 8px;
+	margin-bottom: 8px;
+}
+button:hover { filter: brightness(1.1); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+button.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
+.status { padding: 12px 16px; border-radius: 8px; margin: 12px 0; font-size: 13px; font-family: var(--mono); }
+.status.error { background: rgba(255, 122, 122, 0.1); border: 1px solid var(--danger); color: var(--danger); }
+.status.info { background: var(--bg-elev2); border: 1px solid var(--border); color: var(--text-dim); }
+.status.ok { background: rgba(126, 226, 168, 0.1); border: 1px solid var(--ok); color: var(--ok); }
+pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; font-size: 12px; overflow-x: auto; word-break: break-all; white-space: pre-wrap; }
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.tokenselect { display: flex; gap: 8px; margin-bottom: 16px; }
+.tokenselect button { padding: 6px 12px; font-size: 12px; }
+.tokenselect button.active { background: var(--accent); color: #0b0d10; }
+.tokenselect button:not(.active) { background: var(--bg); color: var(--text-dim); border: 1px solid var(--border); }
+.kv { display: grid; grid-template-columns: 200px 1fr; gap: 6px 18px; font-size: 13px; margin-bottom: 4px; }
+.kv .k { color: var(--text-dim); }
+.kv .v { font-family: var(--mono); word-break: break-all; }
+details { margin: 12px 0; }
+details summary { cursor: pointer; color: var(--text-dim); font-size: 12px; }
+.hint { font-size: 11px; color: var(--text-dim); margin-top: -4px; margin-bottom: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+	<h1>Midas PoR — Push Ops Claim</h1>
+	<p class="tag">Compose an ops claim, upload to IPFS via Pinata, then push <code>addClaim</code> on the SAVE registry.</p>
+
+	<div class="tokenselect">
+		<button class="active" data-token="mFONE">mFONE</button>
+		<button data-token="mHyperBTC">mHyperBTC</button>
+		<button data-token="mHYPER">mHYPER</button>
+		<button data-token="mGLOBAL">mGLOBAL</button>
+		<button data-token="mWIN">mWIN</button>
+		<button data-token="mM1-USD">mM1-USD</button>
+		<button data-token="mTBILL">mTBILL</button>
+		<button data-token="mAPOLLO">mAPOLLO</button>
+	</div>
+
+	<div style="display:flex; gap:12px; align-items:center; margin-bottom:16px; flex-wrap:wrap;">
+		<select id="network" style="max-width: 300px; margin:0;">
+			<option value="mainnet">Ethereum Mainnet (prod registry)</option>
+			<option value="sepolia" selected>Sepolia (test registry)</option>
+		</select>
+		<button id="connectWallet" style="margin:0;">Connect wallet (Fordefi / MetaMask)</button>
+		<span id="walletAddr" class="tag" style="margin:0; font-family:var(--mono); font-size:12px;"></span>
+	</div>
+
+	<div class="grid">
+		<div class="card">
+			<h2>Claim fields</h2>
+
+			<label>token</label>
+			<input id="f_token" value="mFONE">
+
+			<label>createdAt (ISO)</label>
+			<input id="f_createdAt">
+			<div class="hint">Defaults to now.</div>
+
+			<label>navReportedByOps (<b>NET</b>, used in ratio). Currency = the <b>oracle's currency</b>: USD for USD tokens, <b>BTC for mHyperBTC</b>, EUR for mGLOeuro. 2 decimals.</label>
+			<input id="f_navReportedByOps" placeholder="USD tokens: 63765050.85  /  mHyperBTC: 361.42">
+
+			<label>navReportedByOpsGross (<b>GROSS</b>, displayed on site). <b>Same currency as the oracle</b> (USD / BTC / EUR). <span style="color:var(--accent)">NEW</span></label>
+			<input id="f_navReportedByOpsGross" placeholder="USD tokens: 72978078.61  /  mHyperBTC: 361.45">
+			<div class="hint">Non-USD tokens (mHyperBTC/BTC, mGLOeuro/EUR): enter the NAV in the oracle's NATIVE currency (BTC, EUR). The workflow multiplies it by the on-chain BTC/USD (or EUR/USD) feed to get USD. Entering a USD value here over-scales the reserve and the attestation is rejected by the post-flight sanity guard (ratio above 1.30). Gross = off-chain fund NAV (fund admin) + on-chain TVL Midas holds (USDC, AAVE, redemption vault cash). No pending subtraction.</div>
+
+			<label>totalSupplyCrossChainReportedByOps (wei, 18 decimals — NET)</label>
+			<input id="f_totalSupply" placeholder="57801273560000000000000000">
+
+			<label>tokenPriceReportedByOps (USD, 8 decimals)</label>
+			<input id="f_tokenPrice" placeholder="1.10317726">
+
+			<label>oracleAddress</label>
+			<input id="f_oracleAddress">
+
+			<label>oracleChainSelectorName</label>
+			<input id="f_oracleChain" value="ethereum-mainnet">
+
+			<label>priceUpdateTxHash</label>
+			<input id="f_priceUpdateTx">
+
+			<label>priceUpdateChainId</label>
+			<input id="f_priceChainId" value="1">
+
+			<label>vlayerClaimHash (optional — 0x0 or bytes32)</label>
+			<input id="f_vlayerHash" value="0x0000000000000000000000000000000000000000000000000000000000000000">
+		</div>
+
+		<div class="card">
+			<h2>Preview JSON</h2>
+			<textarea id="jsonPreview" readonly></textarea>
+
+			<h2>Pinata upload</h2>
+			<label>Pinata JWT (paste yours — kept in-memory only)</label>
+			<input id="pinataJwt" type="password" placeholder="eyJhbGci...">
+
+			<button id="upload">Upload to IPFS + compute claimHash</button>
+			<button id="downloadGz" class="secondary">Download .json.gz</button>
+
+			<div id="uploadStatus"></div>
+
+			<h2>Transaction to sign</h2>
+			<div id="txDetails">
+				<div class="hint">Upload first to compute claimHash.</div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<script type="module">
+// SHA-256 for proofId + claimTypeId
+async function sha256Hex(str) {
+	const enc = new TextEncoder().encode(str)
+	const hash = await crypto.subtle.digest('SHA-256', enc)
+	return '0x' + Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+// Base58 encode (for IPFS CIDv0)
+const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+function base58Encode(bytes) {
+	let zeros = 0
+	while (zeros < bytes.length && bytes[zeros] === 0) zeros++
+	const size = Math.ceil(((bytes.length - zeros) * 138) / 100) + 1
+	const b58 = new Uint8Array(size)
+	let length = 0
+	for (let i = zeros; i < bytes.length; i++) {
+		let carry = bytes[i], j = 0
+		for (let k = size - 1; (carry !== 0 || j < length) && k >= 0; k--, j++) {
+			carry += 256 * b58[k]
+			b58[k] = carry % 58
+			carry = Math.floor(carry / 58)
+		}
+		length = j
+	}
+	let it = size - length
+	while (it < size && b58[it] === 0) it++
+	let out = '1'.repeat(zeros)
+	for (; it < size; it++) out += BASE58[b58[it]]
+	return out
+}
+
+// Base58 decode → bytes
+function base58Decode(str) {
+	const bytes = []
+	for (const c of str) {
+		const val = BASE58.indexOf(c)
+		if (val < 0) throw new Error('Invalid base58 char: ' + c)
+		let carry = val
+		for (let j = 0; j < bytes.length; j++) {
+			carry += bytes[j] * 58
+			bytes[j] = carry & 0xff
+			carry >>= 8
+		}
+		while (carry > 0) { bytes.push(carry & 0xff); carry >>= 8 }
+	}
+	for (const c of str) { if (c === '1') bytes.push(0); else break }
+	return new Uint8Array(bytes.reverse())
+}
+
+function cidToHash(cid) {
+	const bytes = base58Decode(cid)
+	if (bytes.length < 34 || bytes[0] !== 0x12 || bytes[1] !== 0x20) throw new Error('Not a CIDv0 SHA-256')
+	return '0x' + Array.from(bytes.slice(2, 34)).map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+// Gzip via CompressionStream
+async function gzipJson(obj) {
+	const json = JSON.stringify(obj)
+	const cs = new CompressionStream('gzip')
+	const stream = new Blob([json]).stream().pipeThrough(cs)
+	return new Uint8Array(await new Response(stream).arrayBuffer())
+}
+
+// Token defaults
+const TOKEN_DEFAULTS = {
+	mFONE: { oracle: '0x8D51DBC85cEef637c97D02bdaAbb5E274850e68C', chain: 'ethereum-mainnet', chainId: 1 },
+	mHyperBTC: { oracle: '', chain: 'ethereum-mainnet', chainId: 1 },
+	mHYPER: { oracle: '', chain: 'ethereum-mainnet', chainId: 1 },
+	mGLOBAL: { oracle: '', chain: 'ethereum-mainnet', chainId: 1 },
+	mWIN: { oracle: '', chain: 'ethereum-mainnet', chainId: 1 },
+	'mM1-USD': { oracle: '', chain: 'ethereum-mainnet', chainId: 1 },
+	mTBILL: { oracle: '', chain: 'ethereum-mainnet', chainId: 1 },
+	mAPOLLO: { oracle: '', chain: 'ethereum-testnet-sepolia', chainId: 11155111 },
+}
+
+const REGISTRY = {
+	mainnet: '0x2D6e9F608807436DE5D9603B00Abe3FEd1Bc809d',
+	sepolia: '0x4AbE1936AEc4aAC8177eC65e437A1f8726Bc7F10',
+}
+const OPS_CLAIM_TYPE_NAME = 'midas-ops-claim'
+const OPS_CLAIM_PROVIDER = '0x8003544d32ee074aa8a1fb72129fa8ef7fe02e5f'
+
+// ABI-encode addClaim(bytes32,bytes32,bytes32) — keccak256 selector = 0x899d0a4b
+async function computeSelector(sig) {
+	if (sig === 'addClaim(bytes32,bytes32,bytes32)') return '0x899d0a4b'
+	return null
+}
+
+function padTo32(hex) {
+	const h = hex.replace(/^0x/, '').toLowerCase()
+	return '0'.repeat(64 - h.length) + h
+}
+
+// Token display name → canonical proof name used for sha256(...).
+// Convention: lowercase + strip non-alphanumerics + suffix "-por".
+const PROOF_NAMES = {
+	mFONE: 'mfone-por',
+	mHyperBTC: 'mhyperbtc-por',
+	mHYPER: 'mhyper-por',
+	mGLOBAL: 'mglobal-por',
+	mWIN: 'mwin-por',
+	mGLO: 'mglo-por',
+	'mM1-USD': 'mm1usd-por',
+	mTBILL: 'mtbill-por',
+	mAPOLLO: 'mapollo-por',
+}
+async function computeProofId(name) {
+	const canonical = PROOF_NAMES[name] || (name.toLowerCase().replace(/[^a-z0-9]/g, '') + '-por')
+	return await sha256Hex(canonical)
+}
+async function computeClaimTypeId() {
+	return await sha256Hex(OPS_CLAIM_TYPE_NAME)
+}
+
+// Build claim JSON from form
+function buildClaim() {
+	const claim = {
+		token: document.getElementById('f_token').value.trim(),
+		createdAt: document.getElementById('f_createdAt').value.trim() || new Date().toISOString(),
+		priceUpdateTxHash: document.getElementById('f_priceUpdateTx').value.trim(),
+		priceUpdateChainId: Number(document.getElementById('f_priceChainId').value) || 1,
+		totalSupplyCrossChainReportedByOps: document.getElementById('f_totalSupply').value.trim(),
+		navReportedByOps: document.getElementById('f_navReportedByOps').value.trim(),
+		tokenPriceReportedByOps: document.getElementById('f_tokenPrice').value.trim(),
+		oracleAddress: document.getElementById('f_oracleAddress').value.trim(),
+		oracleChainSelectorName: document.getElementById('f_oracleChain').value.trim(),
+		vlayerClaimHash: document.getElementById('f_vlayerHash').value.trim() || '0x0000000000000000000000000000000000000000000000000000000000000000',
+	}
+	const gross = document.getElementById('f_navReportedByOpsGross').value.trim()
+	if (gross) claim.navReportedByOpsGross = gross
+	return claim
+}
+
+function refreshPreview() {
+	document.getElementById('jsonPreview').value = JSON.stringify(buildClaim(), null, 2)
+}
+
+// Token selector
+document.querySelectorAll('.tokenselect button').forEach(btn => {
+	btn.addEventListener('click', () => {
+		document.querySelectorAll('.tokenselect button').forEach(b => b.classList.remove('active'))
+		btn.classList.add('active')
+		const token = btn.dataset.token
+		document.getElementById('f_token').value = token
+		const d = TOKEN_DEFAULTS[token] || {}
+		document.getElementById('f_oracleAddress').value = d.oracle || ''
+		document.getElementById('f_oracleChain').value = d.chain || 'ethereum-mainnet'
+		document.getElementById('f_priceChainId').value = d.chainId || 1
+		refreshPreview()
+	})
+})
+
+// Refresh preview on any input change
+document.querySelectorAll('input, select').forEach(el => el.addEventListener('input', refreshPreview))
+
+// Init defaults
+document.getElementById('f_createdAt').value = new Date().toISOString()
+document.getElementById('f_oracleAddress').value = TOKEN_DEFAULTS.mFONE.oracle
+refreshPreview()
+
+function setStatus(el, kind, html) {
+	el.innerHTML = html ? `<div class="status ${kind}">${html}</div>` : ''
+}
+
+// Upload to IPFS via Pinata
+document.getElementById('upload').addEventListener('click', async () => {
+	const claim = buildClaim()
+	const jwt = document.getElementById('pinataJwt').value.trim()
+	const statusEl = document.getElementById('uploadStatus')
+
+	if (!jwt) return setStatus(statusEl, 'error', 'Paste your Pinata JWT first.')
+
+	setStatus(statusEl, 'info', 'Gzipping + uploading to Pinata…')
+
+	try {
+		const gz = await gzipJson(claim)
+		const filename = `ops_claim_${claim.token}_${claim.createdAt.slice(0, 10)}.json.gz`
+		const form = new FormData()
+		form.append('file', new Blob([gz], { type: 'application/gzip' }), filename)
+		form.append('pinataMetadata', JSON.stringify({ name: filename }))
+
+		const res = await fetch('https://api.pinata.cloud/pinning/pinFileToIPFS', {
+			method: 'POST',
+			headers: { 'Authorization': `Bearer ${jwt}` },
+			body: form,
+		})
+		const j = await res.json()
+		if (!res.ok || !j.IpfsHash) throw new Error(j.error?.reason || j.error?.details || res.statusText)
+
+		const cid = j.IpfsHash
+		const claimHash = cidToHash(cid)
+
+		setStatus(statusEl, 'ok', `Uploaded ✓<br>CID: ${cid}<br>claimHash: ${claimHash}`)
+
+		// Compute proofId + claimTypeId
+		const proofId = await computeProofId(claim.token)
+		const claimTypeId = await computeClaimTypeId()
+		const sel = await computeSelector('addClaim(bytes32,bytes32,bytes32)')
+
+		const network = document.getElementById('network').value
+		const registry = REGISTRY[network]
+		const calldata = sel + padTo32(proofId) + padTo32(claimHash) + padTo32(claimTypeId)
+
+		document.getElementById('txDetails').innerHTML = `
+			<div class="kv"><div class="k">Network</div><div class="v">${network}</div></div>
+			<div class="kv"><div class="k">Registry (to)</div><div class="v">${registry}</div></div>
+			<div class="kv"><div class="k">proofId</div><div class="v">${proofId}</div></div>
+			<div class="kv"><div class="k">claimHash</div><div class="v">${claimHash}</div></div>
+			<div class="kv"><div class="k">claimTypeId</div><div class="v">${claimTypeId}</div></div>
+			<div class="kv"><div class="k">CID</div><div class="v">${cid}</div></div>
+			<h2 style="margin-top:16px">Calldata for addClaim</h2>
+			<pre>${calldata}</pre>
+			<div class="hint">Send this from an address authorised as ClaimProvider on the registry. On prod that's ${OPS_CLAIM_PROVIDER}. Use Safe, Fordefi, MetaMask, or forge/cast to send.</div>
+			<h2 style="margin-top:16px">Send via connected wallet</h2>
+			<button id="simulateTx" class="secondary">Simulate first (eth_call)</button>
+			<button id="sendTx">Send addClaim tx (Fordefi / MetaMask)</button>
+			<div id="txStatus"></div>
+			<h2 style="margin-top:16px">Cast command (alternative)</h2>
+			<pre>cast send ${registry} "addClaim(bytes32,bytes32,bytes32)" ${proofId} ${claimHash} ${claimTypeId} --rpc-url &lt;RPC&gt; --private-key &lt;OPS_KEY&gt;</pre>
+		`
+
+		document.getElementById('sendTx').addEventListener('click', async () => {
+			const txStatusEl = document.getElementById('txStatus')
+			if (!window.ethereum) return setStatus(txStatusEl, 'error', 'No injected wallet detected. Install Fordefi or MetaMask extension.')
+			try {
+				const chainIdHex = network === 'sepolia' ? '0xaa36a7' : '0x1'
+				try {
+					await window.ethereum.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: chainIdHex }] })
+				} catch (switchErr) {
+					if (switchErr.code === 4902) throw new Error('Chain not added to wallet — add it first')
+					// otherwise ignore, might already be on the right chain
+				}
+				const [from] = await window.ethereum.request({ method: 'eth_requestAccounts' })
+				setStatus(txStatusEl, 'info', 'Sending tx from ' + from + '…')
+				const txHash = await window.ethereum.request({
+					method: 'eth_sendTransaction',
+					params: [{ from, to: registry, data: calldata, value: '0x0' }],
+				})
+				const explorer = network === 'sepolia' ? 'https://sepolia.etherscan.io/tx/' : 'https://etherscan.io/tx/'
+				setStatus(txStatusEl, 'ok', `Tx submitted ✓ <a href="${explorer}${txHash}" target="_blank" style="color:inherit;text-decoration:underline;">${txHash}</a>`)
+			} catch (e) {
+				setStatus(txStatusEl, 'error', 'Tx failed: ' + (e.message || e))
+			}
+		})
+	} catch (e) {
+		setStatus(statusEl, 'error', 'Upload failed: ' + e.message)
+	}
+})
+
+// Wallet connect
+document.getElementById('connectWallet').addEventListener('click', async () => {
+	if (!window.ethereum) return alert('No injected wallet found. Install Fordefi extension or MetaMask.')
+	try {
+		const [addr] = await window.ethereum.request({ method: 'eth_requestAccounts' })
+		document.getElementById('walletAddr').textContent = addr
+	} catch (e) {
+		alert('Wallet connect failed: ' + e.message)
+	}
+})
+
+// Download gzipped JSON locally
+document.getElementById('downloadGz').addEventListener('click', async () => {
+	const claim = buildClaim()
+	const gz = await gzipJson(claim)
+	const filename = `ops_claim_${claim.token}_${claim.createdAt.slice(0, 10)}.json.gz`
+	const url = URL.createObjectURL(new Blob([gz], { type: 'application/gzip' }))
+	const a = document.createElement('a')
+	a.href = url
+	a.download = filename
+	a.click()
+	URL.revokeObjectURL(url)
+})
+</script>
+</body>
+</html>

@@ -33,8 +33,12 @@ Listens for `AttestationSet` events. Fetches the attestation from IPFS, verifies
 | mTBILL | ethereum-mainnet | `0xf65e876f459439e78365c92eb3d47ff358d41b7bec69c9ffb9e624010fb47805` | No |
 | mGLO | ethereum-mainnet-base-1 | `0x31d6a336f57a665c1010b680ca88509ba3184edb8425c4e20789cf0697af5dee` | Yes - JTC |
 | mAPOLLO | ethereum-testnet-sepolia | `0x1b9375422132ca573ec8343d9828d51ad384bfe3ccb803b61afac74fb3c629be` | No (testnet) |
+| solmFONE | Solana (SPL) | `0x979d179868a8099f19d6b7797914da7351f3daaa1ba0acf1e921cb81357761c9` | Yes - Fasanara (once the email covers it; falls back to 1token/ops until then) |
+| solmHYPER | Solana (SPL) | `0xb19da543b198cd33b64833003d8597ad7cdce57f95bfab542bf4575e803b6460` | No |
 
-proofIds are computed as `sha256(proofName)` where `proofName` is the lowercase canonical form (e.g. `mfone-por`, `mhyperbtc-por`, `mm1-usd-por`) - SHA-256, not keccak256.
+This table is illustrative; the **live, authoritative list is the token registry** ([`tokens.json`](./tokens.json)). More tokens are registered there (mGLOeuro, mM1BTC, mBASIS, mEDGE, mSL, mLIQUIDITY, mROX, …).
+
+proofIds are computed as `sha256(proofName)` where `proofName` is the lowercase **alphanumeric** canonical form: strip non-alphanumeric chars, then append `-por` (e.g. `mfone-por`, `mhyperbtc-por`, `mm1usd-por` — the hyphen in mM1-USD is stripped, `solmfone-por`). SHA-256, not keccak256.
 
 ---
 
@@ -50,7 +54,7 @@ All `cre_consensus` claims are produced by the Chainlink DON and trusted as-is b
 | `onetoken_report` | object / cre_consensus | 1token portfolio report (`assets`, `liabilities`, `equity`, optional `navBase`, optional `pendingRedemptionMillionsUSD`). `_metadata.anchorRule` is `vlayer_email_date_plus_1h` (token with fund-manager email) or `ops_created_at_minus_3h` (token without). `_metadata.anchorISO` is the resolved ISO timestamp used for the 1token snapshot query - verifiers can re-fetch the exact same snapshot |
 | `onetoken_total_nav` | numeric / source-backed | Resolved from `onetoken_report#/equity/total` |
 | `onchain_supply` | object / cre_consensus | ERC-20 `totalSupply()` at attestation time + `readAt` timestamp |
-| `overcollateralization` | object / cre_consensus | Overcollateralization verification result. Formula: `ratio = totalReserveNetUSD / (supplyTokensNet × oraclePriceUSD)`; passes when `ratio > threshold` (default `0.995`). **Frontend-facing fields:** `totalReserveGrossUSD` (reserve including pending redemption commitment, for display), `totalReserveNetUSD` (reserve used in the ratio), `supplyTokensNet` (supply used in the ratio), `oraclePriceFormatted`, `ratio`, `passed`, `threshold`, `overcollateralizationType` (opaque label - internal audit only). **Breakdown fields (optional, present when the underlying source is available):** `oneTokenOnchainAUM`, `fundManagerNavUSD`, `onchainReserveWalletsUSD` (sum of USDC + priced-token balances added to reserve via balanceOf at attestation time), `supplyExclusionsOnchainTokens` (sum of primary-token balances subtracted from raw supply via balanceOf), `pendingRedemptionUSD`, `navPerToken`, `totalSupplyCrossChainReportedByOps`, `totalSupplyTokens`. **Legacy aliases (kept for backward compat):** `totalReserveUSD` (=`totalReserveNetUSD`), `supplyTokens` (=`supplyTokensNet`), `oneTokenAUM` (=`totalReserveNetUSD`). |
+| `overcollateralization` | object / cre_consensus | Overcollateralization result. Formula: `ratio = totalReserveGrossUSD / (supplyTokens × oraclePriceUSD)`; passes when `ratio > threshold` (default `0.995`), rejected by a post-flight guard if `ratio > 1.30`. **Core fields:** `totalReserveGrossUSD`, `supplyTokens` (gross on-chain), `tvlUSD`, `oraclePriceUSD` (USD, after any `oracleQuoteFeed` conversion), `oraclePriceFormatted`, `navPerToken`, `ratio`, `passed`, `threshold`, `overcollateralizationType` (opaque internal label for the reserve-sourcing path). **Non-USD oracles also carry:** `oracleRawPrice` + `oracleQuoteRate` (the BTC/USD or EUR/USD conversion applied). **Reserve breakdown (present per available source, for site display):** `fundManagerNavUSD`, `oneTokenOnchainAUM`, `onchainReserveWalletsUSD`, `opsGrossReserveNative`. **Legacy aliases (gross model, so net == gross):** `totalReserveUSD`, `totalReserveNetUSD`, `supplyTokensNet`, `totalSupplyTokens`, `navReportedByOps`, `totalSupplyCrossChainReportedByOps`. |
 | `overcollateralization_ratio` | numeric / source-backed | Resolved from `overcollateralization#/ratio` |
 | `fund_manager_claim` | object / tls_notary | Vlayer TLS proof of fund manager email (tokens with a vlayer claim only) |
 | `email_nav` | object / cre_consensus | Extracted NAV from email: `{ navUSD, navIsTotal, navFields }`. `navIsTotal=false` = additive fund-manager-reported portion (CEX, OTC, fund shares - whatever surfaced in the email); `navIsTotal=true` = full NAV cross-check. `navFields` lists the email line labels that were summed - verifiers can re-extract the same value from the vlayer email proof |
@@ -60,23 +64,24 @@ All `cre_consensus` claims are produced by the Chainlink DON and trusted as-is b
 
 ### Overcollateralization formula
 
-The formula is the same across every product; only the composition of `totalReserveNetUSD` and `supplyTokensNet` varies by token config.
+Everything is **gross** and **USD-denominated**. For tokens whose oracle is not priced in USD (mHyperBTC priced in BTC, mGLOeuro priced in EUR) the oracle price is first converted with a Chainlink `oracleQuoteFeed` (BTC/USD, EUR/USD):
 
 ```
-ratio  =  totalReserveNetUSD  /  (supplyTokensNet × oraclePriceUSD)
-passed =  ratio > threshold        (default threshold = 0.995)
+oraclePriceUSD = rawOraclePrice × quoteRate        (quoteRate = 1 for USD oracles)
+tvlUSD         = grossOnchainSupply × oraclePriceUSD
+ratio          = grossReserveUSD / tvlUSD
+passed         = ratio > threshold                 (default 0.995)
 ```
 
-Per-token composition (external check when data is available):
+A post-flight sanity guard **rejects** the attestation if `ratio > 1.30` (reserve more than 30% above on-chain TVL: a currency mismatch or double-count).
 
-- **mFONE** - Reserve = `1token_equity_total + vlayer_email_nav + Σ USDC(reserveOnchainWallets.usdcWallets)`; Supply = `midas_endpoint_supply − pending_tokens_from_email − Σ balanceOf(supplyExclusionWallets)`. `vlayer_email_nav = Total Notional Amount + Net Accrued Interest`.
-- **mGLOBAL, mGLO** - Reserve = `1token_equity_total + vlayer_email_nav`; Supply = `midas_endpoint_supply − pending_tokens`. `vlayer_email_nav = Fund Value + Pending Subscription` (Pending Subscription tokens are already minted; cash-in-transit is counted as a receivable to keep the ratio consistent with circulating supply). `pending_tokens` is derived from `Pending Redemption`.
-- **mM1-USD** - Reserve = `vlayer_email_nav` (navIsTotal=true → 1token used as cross-check only); Supply = `midas_endpoint_supply − pending_tokens`.
-- **mWIN** - Reserve = `1token_equity_total + vlayer_email_nav` (Northern Trust email); Supply = `midas_endpoint_supply − pending_tokens`.
-- **mHyperBTC** - Reserve = `1token_navBase × oraclePriceUSD`; Supply = `midas_endpoint_supply − pending_tokens`.
-- **mHYPER, mTBILL** - Reserve = `1token_equity_total × 1e6`; Supply = `midas_endpoint_supply − pending_tokens`.
+**Reserve sourcing:** the gross reserve is assembled from the token's available data - the vlayer-notarized fund-manager NAV, the 1token on-chain equity (net of the off-chain `general_wallet` fund-share portion, so it is not double-counted with the email NAV), on-chain reserve-wallet balances, and an ops-reported gross NAV - each scaled to USD via the quote feed for non-USD oracles. `overcollateralizationType` records which internal sourcing path produced the published figure.
 
-Where `pending_tokens = pendingRedemptionUSD / oraclePriceUSD` and `pendingRedemptionUSD` is the sum of the `pendingRedemptionSource` (1token wallet pattern + vlayer email fields).
+`grossOnchainSupply` is the cross-chain circulating supply from the Midas supply endpoint. The gross model does **not** subtract pending redemptions - reserve and supply are both gross.
+
+Non-USD oracles convert with `oracleQuoteFeed`: **mHyperBTC** (BTC → BTC/USD), **mGLOeuro** (EUR → EUR/USD). Every other token's oracle is already USD.
+
+**Solana (SPL) tokens** (solmFONE, solmHYPER): the same gross ratio, but `grossOnchainSupply` comes from the SPL mint (`getTokenSupply`) and `oraclePriceUSD` from a Midas manual feed account on Solana (both USD). The attestation is still triggered and published on the EVM registry.
 
 ---
 
@@ -125,7 +130,7 @@ Every DON-produced value has a documented source; anyone can reproduce it indepe
 | `oracle_price` | `AggregatorV3Interface(oracle_price#/oracleAddress).latestRoundData()` at the block whose timestamp matches `oracleLastUpdatedAt`. |
 | `onetoken_report` | Query `https://api-prod.midas.app/api/transparency/by-timestamp?asset=<name>&ts=<_metadata.anchorISO>` - the response `reports` field must be byte-identical to `onetoken_report#/`. |
 | `onchain_supply` | `IERC20(tokenAddress).totalSupply()` at the block whose timestamp matches `readAt`. |
-| `overcollateralization` | Recompute using the formula in [Overcollateralization formula](#overcollateralization-formula) and the token's `oneTokenApi.offchainEquityKeys`, `supplyExclusionWallets`, `reserveOnchainWallets`, `pendingRedemptionSource` from the [token registry](https://raw.githubusercontent.com/midas-apps/midas-por-v2/main/tokens.json). |
+| `overcollateralization` | Recompute with the gross formula in [Overcollateralization formula](#overcollateralization-formula): `oraclePriceUSD = rawOracle × oracleQuoteFeed` (non-USD oracles only), `tvlUSD = grossOnchainSupply × oraclePriceUSD`, `ratio = totalReserveGrossUSD / tvlUSD`. The reserve sources plus `oracleQuoteFeed`, `offchainEquityKeys` and `reserveOnchainWallets` are in the [token registry](https://raw.githubusercontent.com/midas-apps/midas-por-v2/main/tokens.json). |
 
 **5. Re-derive on-chain balance queries**
 
@@ -310,9 +315,11 @@ If the remote fetch fails (network / CDN outage), the workflow falls back to the
 | `name` | Yes | Token name (used in filenames and logs) |
 | `address` | No | Primary ERC-20 token contract address (used for `balanceOf` queries and the Midas supply endpoint) |
 | `chainSelectorName` | No | Chainlink chain selector name for the primary chain the token lives on. Default: `ethereum-mainnet` |
+| `oracleQuoteFeed` | No | Chainlink feed converting the price oracle's quote currency to USD, for tokens whose oracle is **not** USD-denominated (mHyperBTC oracle in BTC → BTC/USD feed `0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c`; mGLOeuro oracle in EUR → EUR/USD feed). When set, `oraclePriceUSD = rawOracle × quoteFeed` and the ops NAV (reported in the oracle's native currency) is scaled the same way, so the whole ratio is USD. Absent = oracle already USD |
+| `solana` | No | Marks an SPL (Solana) token: `{ mint, priceFeed, rpcUrl, maxStalenessSec? }`. When set, supply is read from the SPL `mint` via `getTokenSupply` and the price from the Midas manual `priceFeed` account over `rpcUrl` (Solana JSON-RPC in node mode), instead of the EVM oracle + EVM cross-chain supply. Both are USD-denominated. The trigger stays on the **EVM** registry (ops push the NewClaim there, referencing the Solana price-update tx); the reserve path (vlayer / 1token / ops) is unchanged. `maxStalenessSec` defaults to `2592000` (30 days), matching the feed's own staleness config |
 | `oneTokenApi.tokenName` | Yes (if 1token) | Token name as used in the 1token API |
-| `oneTokenApi.useNavBase` | No | Use 1token `navBase` (fund base currency, e.g. BTC) × oracle price instead of `equity.total × 1e6`. Default `false` |
-| `oneTokenApi.offchainEquityKeys` | No | Sub-keys of `assets_by_protocol.equity` to subtract from `equity.total` to isolate the strictly on-chain AUM (defence against 1token schema drift where an off-chain synthetic entry leaks into equity). Default `["general_wallet"]` - no-op with the current 1token schema (`general_wallet` is not in `equity`); kept as a safe guard against regressions |
+| `oneTokenApi.useNavBase` | No | **Deprecated.** Legacy path using 1token `navBase` (fund base currency) instead of `equity.total`. `navBase` (`pv_base`) is unreliable for multi-chain tokens, so every token uses `false`; non-USD oracles convert the USD equity via `oracleQuoteFeed` instead. Default `false` |
+| `oneTokenApi.offchainEquityKeys` | No | Sub-keys of `assets_by_protocol.equity` subtracted from `equity.total` to isolate the strictly on-chain AUM. The current 1token schema **includes** `general_wallet` (synthetic OTC account for off-chain fund shares) in `equity.total`, so this subtraction is **active** and prevents double-counting the fund NAV (also reported via the vlayer email). A WARN fires if `navIsTotal=false` but nothing was subtracted. Default `["general_wallet"]` |
 | `oneTokenApi.timestampOffsetHoursBack` | No | Hours-back list to try when fetching the 1token snapshot. Default `[0, 1, 2, 3, 4]` - resilient to the endpoint's occasional 2-3h publication lag |
 | `fundManager` | No | Vlayer TLS-notarised email config - enables the fund-manager NAV vlayer claim |
 | `fundManager.navFields` | If fundManager | Array of email line labels to **sum** (e.g. `["Total Notional Amount", "Net Accrued Interest"]`) |
