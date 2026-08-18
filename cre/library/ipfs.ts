@@ -92,11 +92,14 @@ export function fetchFromIpfs<T extends IPFSConfig>(
 ): Uint8Array {
 	const primary = nodeRuntime.config.ipfsHttpEndpoint.url
 	const gateways = [primary, ...IPFS_FALLBACK_GATEWAYS.filter((g) => g !== primary)]
+	// Never log the configured primary URL verbatim — it's a private/dedicated gateway
+	// and execution logs are visible outside our infra. Public fallbacks are fine to log.
+	const label = (base: string) => (base === primary ? 'primary' : base)
 
 	const httpClient = new HTTPClient()
 	let lastErr = 'none'
 	for (const base of gateways) {
-		nodeRuntime.log(`fetchFromIpfs: trying ${base}/ipfs/${ipfsCid}`)
+		nodeRuntime.log(`fetchFromIpfs: trying ${label(base)}`)
 		try {
 			const response = httpClient
 				.sendRequest(nodeRuntime, {
@@ -107,14 +110,14 @@ export function fetchFromIpfs<T extends IPFSConfig>(
 				})
 				.result()
 			if (response.statusCode === 200) {
-				nodeRuntime.log(`fetchFromIpfs: ${base} -> 200 OK (${response.body.length} bytes)`)
+				nodeRuntime.log(`fetchFromIpfs: ${label(base)} -> 200 OK (${response.body.length} bytes)`)
 				return response.body
 			}
-			lastErr = `${base} -> HTTP ${response.statusCode}`
+			lastErr = `${label(base)} -> HTTP ${response.statusCode}`
 			nodeRuntime.log(`fetchFromIpfs: ${lastErr}`)
 		} catch (e) {
 			// timeout ("context deadline exceeded") or transport error - try next gateway
-			lastErr = `${base} -> ${e instanceof Error ? e.message : String(e)}`
+			lastErr = `${label(base)} -> ${e instanceof Error ? e.message : String(e)}`
 			nodeRuntime.log(`fetchFromIpfs: ${lastErr}`)
 		}
 	}
