@@ -24,11 +24,28 @@ export function extractFromStructuredText(
   text: StructuredTextData,
   pointer: string
 ): string {
-  const [pointerType, pointerValue] = pointer.split(':');
+  const match = pointer.match(/^(line|char|lines):(.+)$/);
+  if (!match) {
+    throw new Error(`Invalid structured-text pointer: "${pointer}"`);
+  }
+
+  const [, pointerType, pointerValue] = match;
+  const parseIndex = (value: string, label: string): number => {
+    if (!/^\d+$/.test(value)) {
+      throw new Error(`${label} must be a non-negative integer, got "${value}"`);
+    }
+
+    const parsed = Number(value);
+    if (!Number.isSafeInteger(parsed)) {
+      throw new Error(`${label} is outside the safe integer range`);
+    }
+
+    return parsed;
+  };
 
   switch (pointerType) {
     case 'line': {
-      const lineNum = parseInt(pointerValue, 10);
+      const lineNum = parseIndex(pointerValue, 'Line number');
       const lines = text.split('\n');
       if (lineNum < 1 || lineNum > lines.length) {
         throw new Error(`Line ${lineNum} out of range (1-${lines.length})`);
@@ -37,17 +54,29 @@ export function extractFromStructuredText(
     }
 
     case 'char': {
-      const [start, end] = pointerValue.split('-').map(s => parseInt(s, 10));
-      if (start < 0 || end > text.length) {
+      const range = pointerValue.match(/^(\d+)-(\d+)$/);
+      if (!range) {
+        throw new Error(`Character range must use the format START-END, got "${pointerValue}"`);
+      }
+
+      const start = parseIndex(range[1], 'Character range start');
+      const end = parseIndex(range[2], 'Character range end');
+      if (start > end || end > text.length) {
         throw new Error(`Character range ${start}-${end} out of bounds (text length: ${text.length})`);
       }
       return text.substring(start, end);
     }
 
     case 'lines': {
-      const [startLine, endLine] = pointerValue.split('-').map(s => parseInt(s, 10));
+      const range = pointerValue.match(/^(\d+)-(\d+)$/);
+      if (!range) {
+        throw new Error(`Line range must use the format START-END, got "${pointerValue}"`);
+      }
+
+      const startLine = parseIndex(range[1], 'Line range start');
+      const endLine = parseIndex(range[2], 'Line range end');
       const lines = text.split('\n');
-      if (startLine < 1 || endLine > lines.length) {
+      if (startLine < 1 || startLine > endLine || endLine > lines.length) {
         throw new Error(`Line range ${startLine}-${endLine} out of range (1-${lines.length})`);
       }
       return lines.slice(startLine - 1, endLine).join('\n');
