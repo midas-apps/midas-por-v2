@@ -8,7 +8,8 @@
  * - Source-backed claim resolution
  */
 
-import { sign } from '../crypto/ecdsa.js';
+import { sign, getPublicKey } from '../crypto/ecdsa.js';
+
 import { checkAttestationVersion } from '../version.js';
 
 const NUMERIC_EPSILON = 1e-9;
@@ -952,8 +953,13 @@ function signVerification(
 ): VerificationSignature {
   // Hash all the verification data (everything except signature)
   const dataHash = hashObject(verificationData);
-  
+
   try {
+    const derivedPublicKey = getPublicKey(signingKey);
+    if (derivedPublicKey.toLowerCase() !== publicKey.toLowerCase()) {
+      throw new Error('Signing key does not match the verifier public key');
+    }
+
     const signature = sign(dataHash, signingKey);
 
     return {

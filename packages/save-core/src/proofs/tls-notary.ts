@@ -32,6 +32,43 @@ export interface VerifyZkTlsNotaryOptions {
   authToken: string;
   /** Optional custom HTTP client (defaults to FetchHttpClient) */
   httpClient?: HttpClient;
+  /** Additional explicitly trusted HTTPS origins for a compatible Vlayer deployment */
+  allowedVerificationOrigins?: readonly string[];
+}
+
+const DEFAULT_VLAYER_VERIFICATION_ENDPOINT =
+  'https://web-prover.production.vlayer.xyz/api/v2.0/verify';
+const VLAYER_VERIFICATION_PATH = '/api/v2.0/verify';
+
+function validateVerificationEndpoint(
+  endpoint: string,
+  allowedVerificationOrigins: readonly string[] = [],
+): void {
+  let parsedEndpoint: URL;
+  try {
+    parsedEndpoint = new URL(endpoint);
+  } catch {
+    throw new Error('Vlayer verification endpoint must be a valid URL');
+  }
+
+  const allowedOrigins = new Set([
+    new URL(DEFAULT_VLAYER_VERIFICATION_ENDPOINT).origin,
+    ...allowedVerificationOrigins.map((origin) => new URL(origin).origin),
+  ]);
+
+  if (
+    parsedEndpoint.protocol !== 'https:' ||
+    parsedEndpoint.username ||
+    parsedEndpoint.password ||
+    parsedEndpoint.pathname !== VLAYER_VERIFICATION_PATH ||
+    parsedEndpoint.search ||
+    parsedEndpoint.hash ||
+    !allowedOrigins.has(parsedEndpoint.origin)
+  ) {
+    throw new Error(
+      'Vlayer verification endpoint must use HTTPS and an explicitly trusted Vlayer verification origin',
+    );
+  }
 }
 
 /**
@@ -59,8 +96,13 @@ export async function verifyZkTlsNotaryProof(
     }
 
     const httpClient = options.httpClient ?? new FetchHttpClient();
+    validateVerificationEndpoint(
+      proof.verificationEndpoint,
+      options.allowedVerificationOrigins,
+    );
 
     // v2: single bearer header, no x-client-id
+
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${options.authToken}`,
@@ -228,7 +270,8 @@ export function createVlayerProof(options: {
     mechanism: 'zk_tls_notary',
     platform: 'vlayer',
     proof: options.proofData,
-    verificationEndpoint: options.verificationEndpoint || 'https://web-prover.production.vlayer.xyz/api/v2.0/verify',
+    verificationEndpoint: options.verificationEndpoint || DEFAULT_VLAYER_VERIFICATION_ENDPOINT,
+
     serverDomain: options.serverDomain,
     notaryKeyFingerprint: options.notaryKeyFingerprint,
   };
