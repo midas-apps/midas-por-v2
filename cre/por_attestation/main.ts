@@ -665,26 +665,27 @@ const runWorkflow = async (
 		}
 		candidates.push({ grossReserveUSD: opsGrossUSD, aumSource: 'method-2:ops', supplySource: 'method-2' })
 
+		// Sanity ceiling: a candidate whose reserve exceeds on-chain TVL (supply × price) by more than
+		// 30% signals a currency mismatch (e.g. ops NAV entered in USD for a BTC/EUR token so quoteRate
+		// double-scales it), a double-count, or a bad upstream data source (e.g. 1token) — reject that
+		// candidate and fall through to the next one (down to method-2:ops) rather than attest garbage.
+		const SANITY_CEILING = 1.30
 		let selectedCandidate: { grossReserveUSD: number; aumSource: string; supplySource: 'method-1' | 'method-2'; ratio: number } | null = null
 		for (const c of candidates) {
 			const ratio = tvlUSD > 0 ? c.grossReserveUSD / tvlUSD : 0
 			runtime.log(`Candidate ${c.aumSource}: reserve=${c.grossReserveUSD.toFixed(0)} / TVL=${tvlUSD.toFixed(0)} (supply ${grossSupplyTokens.toFixed(2)} × ${oraclePriceUSD.toFixed(6)}) = ratio ${ratio.toFixed(4)}`)
+			if (ratio > SANITY_CEILING) {
+				runtime.log(`Candidate ${c.aumSource} rejected: ratio ${ratio.toFixed(4)} exceeds sanity ceiling ${SANITY_CEILING} (reserve ${c.grossReserveUSD.toFixed(0)} > TVL ${tvlUSD.toFixed(0)} × ${SANITY_CEILING}), trying next candidate`)
+				continue
+			}
 			if (ratio > threshold) { selectedCandidate = { grossReserveUSD: c.grossReserveUSD, aumSource: c.aumSource, supplySource: c.supplySource, ratio }; break }
 		}
 
 		if (!selectedCandidate) {
 			throw new Error(
 				`Overcollateralization check failed for ${tokenConfig.name}. ` +
-				`All candidates below threshold=${threshold}. Attestation will not be pushed.`
+				`All candidates either below threshold=${threshold} or above sanity ceiling=${SANITY_CEILING}. Attestation will not be pushed.`
 			)
-		}
-
-		// Post-flight sanity: the reserve must not exceed on-chain TVL (supply × price) by more than
-		// 30%. A ratio > 1.30 signals a currency mismatch (e.g. ops NAV entered in USD for a BTC/EUR
-		// token so quoteRate double-scales it) or a double-count — reject rather than attest garbage.
-		if (selectedCandidate.ratio > 1.30) {
-			runtime.log(`Post-flight sanity FAILED: ${tokenConfig.name} ratio ${selectedCandidate.ratio.toFixed(4)} > 1.30 (reserve ${selectedCandidate.grossReserveUSD.toFixed(0)} > TVL ${tvlUSD.toFixed(0)} × 1.30), source=${selectedCandidate.aumSource}`)
-			throw new Error(`Post-flight sanity check failed for ${tokenConfig.name}: overcollateralization ratio ${selectedCandidate.ratio.toFixed(4)} exceeds 1.30 (reserve > on-chain TVL + 30%).`)
 		}
 
 		runtime.log(`Overcollateralization passed: ${selectedCandidate.aumSource}, ratio=${selectedCandidate.ratio.toFixed(4)}, supply source=${supplySource}`)
