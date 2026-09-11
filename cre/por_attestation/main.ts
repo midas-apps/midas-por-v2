@@ -418,6 +418,33 @@ const runWorkflow = async (
 			emailNavUSD = extractNavFromEmail(fundManagerEmailClaim, fm.navFields)
 			if (emailNavUSD !== null) {
 				runtime.log(`Email NAV extracted: ${emailNavUSD.toFixed(2)} USD (navIsTotal=${fm.navIsTotal})`)
+
+				// Staleness guard: the email's own `Date` header must be recent relative to the
+				// ops claim, or this NAV is not actually "current" — a fund manager who hasn't
+				// sent an update in weeks/months would otherwise silently pass a stale NAV
+				// through as if it were fresh. Invalidate the candidate (fall through to
+				// method-2:ops) rather than attest a number that says nothing about today.
+				const emailHeaders = fundManagerEmailClaim.resolve('/response/@parseJson(body)/payload/headers') as Array<{ name: string; value: string }>
+				const emailDateHeader = emailHeaders.find(h => h.name === 'Date')
+				if (!emailDateHeader) {
+					runtime.log(`WARN: email has no Date header, cannot check staleness — invalidating NAV candidate for ${tokenConfig.name}`)
+					emailNavUSD = null
+				} else {
+					const emailDate = new Date(emailDateHeader.value)
+					if (isNaN(emailDate.getTime())) {
+						runtime.log(`WARN: invalid email Date header "${emailDateHeader.value}" — invalidating NAV candidate for ${tokenConfig.name}`)
+						emailNavUSD = null
+					} else {
+						const ageDays = (new Date(opsClaimData.createdAt).getTime() - emailDate.getTime()) / 86_400_000
+						const maxAgeDays = fm.maxEmailStalenessDays
+						if (ageDays > maxAgeDays) {
+							runtime.log(`WARN: ${tokenConfig.name} fund manager email is ${ageDays.toFixed(1)} days old (sent ${emailDate.toISOString()}), exceeds maxEmailStalenessDays=${maxAgeDays} — invalidating NAV candidate, falling through to method-2:ops`)
+							emailNavUSD = null
+						} else {
+							runtime.log(`Email staleness OK: ${ageDays.toFixed(1)} days old (max ${maxAgeDays})`)
+						}
+					}
+				}
 			} else {
 				runtime.log(`WARN: could not extract NAV from email (navFields=${JSON.stringify(fm.navFields)})`)
 			}
@@ -706,7 +733,10 @@ const runWorkflow = async (
 			tvlUSD,
 			ratio: selectedCandidate.ratio,
 			threshold,
-			aumSource: selectedCandidate.aumSource,
+			// Public claim only ever says 'method-1' or 'method-2' — never the specific source
+			// (vlayer_total, ops, 1token, ...). The detailed `aumSource` stays in CRE execution
+			// logs (see the runtime.log calls above) for internal debugging only.
+			aumSource: selectedCandidate.supplySource,
 			opsClaimData,
 			oracleRawPrice: Number(oraclePriceData.answer) / Math.pow(10, oraclePriceData.decimals),
 			quoteRate,
