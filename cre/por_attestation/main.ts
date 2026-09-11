@@ -418,6 +418,33 @@ const runWorkflow = async (
 			emailNavUSD = extractNavFromEmail(fundManagerEmailClaim, fm.navFields)
 			if (emailNavUSD !== null) {
 				runtime.log(`Email NAV extracted: ${emailNavUSD.toFixed(2)} USD (navIsTotal=${fm.navIsTotal})`)
+
+				// Staleness guard: the email's own `Date` header must be recent relative to the
+				// ops claim, or this NAV is not actually "current" — a fund manager who hasn't
+				// sent an update in weeks/months would otherwise silently pass a stale NAV
+				// through as if it were fresh. Invalidate the candidate (fall through to
+				// method-2:ops) rather than attest a number that says nothing about today.
+				const emailHeaders = fundManagerEmailClaim.resolve('/response/@parseJson(body)/payload/headers') as Array<{ name: string; value: string }>
+				const emailDateHeader = emailHeaders.find(h => h.name === 'Date')
+				if (!emailDateHeader) {
+					runtime.log(`WARN: email has no Date header, cannot check staleness — invalidating NAV candidate for ${tokenConfig.name}`)
+					emailNavUSD = null
+				} else {
+					const emailDate = new Date(emailDateHeader.value)
+					if (isNaN(emailDate.getTime())) {
+						runtime.log(`WARN: invalid email Date header "${emailDateHeader.value}" — invalidating NAV candidate for ${tokenConfig.name}`)
+						emailNavUSD = null
+					} else {
+						const ageDays = (new Date(opsClaimData.createdAt).getTime() - emailDate.getTime()) / 86_400_000
+						const maxAgeDays = fm.maxEmailStalenessDays
+						if (ageDays > maxAgeDays) {
+							runtime.log(`WARN: ${tokenConfig.name} fund manager email is ${ageDays.toFixed(1)} days old (sent ${emailDate.toISOString()}), exceeds maxEmailStalenessDays=${maxAgeDays} — invalidating NAV candidate, falling through to method-2:ops`)
+							emailNavUSD = null
+						} else {
+							runtime.log(`Email staleness OK: ${ageDays.toFixed(1)} days old (max ${maxAgeDays})`)
+						}
+					}
+				}
 			} else {
 				runtime.log(`WARN: could not extract NAV from email (navFields=${JSON.stringify(fm.navFields)})`)
 			}
@@ -665,26 +692,27 @@ const runWorkflow = async (
 		}
 		candidates.push({ grossReserveUSD: opsGrossUSD, aumSource: 'method-2:ops', supplySource: 'method-2' })
 
+		// Sanity ceiling: a candidate whose reserve exceeds on-chain TVL (supply × price) by more than
+		// 30% signals a currency mismatch (e.g. ops NAV entered in USD for a BTC/EUR token so quoteRate
+		// double-scales it), a double-count, or a bad upstream data source (e.g. 1token) — reject that
+		// candidate and fall through to the next one (down to method-2:ops) rather than attest garbage.
+		const SANITY_CEILING = 1.30
 		let selectedCandidate: { grossReserveUSD: number; aumSource: string; supplySource: 'method-1' | 'method-2'; ratio: number } | null = null
 		for (const c of candidates) {
 			const ratio = tvlUSD > 0 ? c.grossReserveUSD / tvlUSD : 0
 			runtime.log(`Candidate ${c.aumSource}: reserve=${c.grossReserveUSD.toFixed(0)} / TVL=${tvlUSD.toFixed(0)} (supply ${grossSupplyTokens.toFixed(2)} × ${oraclePriceUSD.toFixed(6)}) = ratio ${ratio.toFixed(4)}`)
+			if (ratio > SANITY_CEILING) {
+				runtime.log(`Candidate ${c.aumSource} rejected: ratio ${ratio.toFixed(4)} exceeds sanity ceiling ${SANITY_CEILING} (reserve ${c.grossReserveUSD.toFixed(0)} > TVL ${tvlUSD.toFixed(0)} × ${SANITY_CEILING}), trying next candidate`)
+				continue
+			}
 			if (ratio > threshold) { selectedCandidate = { grossReserveUSD: c.grossReserveUSD, aumSource: c.aumSource, supplySource: c.supplySource, ratio }; break }
 		}
 
 		if (!selectedCandidate) {
 			throw new Error(
 				`Overcollateralization check failed for ${tokenConfig.name}. ` +
-				`All candidates below threshold=${threshold}. Attestation will not be pushed.`
+				`All candidates either below threshold=${threshold} or above sanity ceiling=${SANITY_CEILING}. Attestation will not be pushed.`
 			)
-		}
-
-		// Post-flight sanity: the reserve must not exceed on-chain TVL (supply × price) by more than
-		// 30%. A ratio > 1.30 signals a currency mismatch (e.g. ops NAV entered in USD for a BTC/EUR
-		// token so quoteRate double-scales it) or a double-count — reject rather than attest garbage.
-		if (selectedCandidate.ratio > 1.30) {
-			runtime.log(`Post-flight sanity FAILED: ${tokenConfig.name} ratio ${selectedCandidate.ratio.toFixed(4)} > 1.30 (reserve ${selectedCandidate.grossReserveUSD.toFixed(0)} > TVL ${tvlUSD.toFixed(0)} × 1.30), source=${selectedCandidate.aumSource}`)
-			throw new Error(`Post-flight sanity check failed for ${tokenConfig.name}: overcollateralization ratio ${selectedCandidate.ratio.toFixed(4)} exceeds 1.30 (reserve > on-chain TVL + 30%).`)
 		}
 
 		runtime.log(`Overcollateralization passed: ${selectedCandidate.aumSource}, ratio=${selectedCandidate.ratio.toFixed(4)}, supply source=${supplySource}`)
@@ -705,7 +733,10 @@ const runWorkflow = async (
 			tvlUSD,
 			ratio: selectedCandidate.ratio,
 			threshold,
-			aumSource: selectedCandidate.aumSource,
+			// Public claim only ever says 'method-1' or 'method-2' — never the specific source
+			// (vlayer_total, ops, 1token, ...). The detailed `aumSource` stays in CRE execution
+			// logs (see the runtime.log calls above) for internal debugging only.
+			aumSource: selectedCandidate.supplySource,
 			opsClaimData,
 			oracleRawPrice: Number(oraclePriceData.answer) / Math.pow(10, oraclePriceData.decimals),
 			quoteRate,

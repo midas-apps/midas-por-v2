@@ -90,9 +90,12 @@ export function createOraclePriceNumericClaim(): NumericClaim {
  *   ratio = navPerToken / oraclePriceUSD = grossReserveUSD / (grossSupplyTokens × oraclePriceUSD)
  * Verifiers read `overcollateralization#/ratio` (unchanged) → proof-compatible, no verifier change.
  *
- * `overcollateralizationType` and the per-source breakdown fields are consumed by the Midas
- * frontend site to display the reserve composition — do NOT rename or drop them. (The reserve
- * path is inferable from these; that is accepted for a transparent PoR display.)
+ * `overcollateralizationType` is consumed by the Midas frontend site — do NOT rename or drop
+ * it. As of 2026-09, its value is intentionally generic (`method-1` / `method-2` only): the
+ * specific source (vlayer email, 1token, ops...) is no longer exposed in the public claim, to
+ * avoid leaking which upstream method backed a given reserve figure. The detailed breakdown
+ * fields below (`fundManagerNavUSD`, `oneTokenOnchainAUM`, etc. — whichever are non-null) still
+ * let a reader infer composition without an explicit label.
  */
 export function createOvercollateralizationClaim(args: {
 	grossReserveUSD: number

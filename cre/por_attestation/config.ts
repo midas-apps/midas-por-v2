@@ -32,6 +32,14 @@ const fundManagerConfigSchema = z
 		tokenName: z.string(),
 		navFields: z.array(z.string()).min(1),
 		navIsTotal: z.boolean().default(false),
+		// Reject the email's NAV as a method-1 candidate if the email's own `Date` header
+		// is older than this many days relative to the ops claim's createdAt. A stale NAV
+		// report (fund manager hasn't sent an update) must not be attested as current —
+		// falls through to method-2:ops instead (visible in the attestation's
+		// `overcollateralizationType` switching from method-1:vlayer_total to method-2:ops,
+		// no separate staleness flag needed). Default 14 days: generous vs. typical
+		// weekly/bi-weekly reporting cadence, but catches multi-week/month-old staleness.
+		maxEmailStalenessDays: z.number().positive().default(14),
 	})
 	.refine((d) => emailRegex.test(d.expectedEmail) || domainRegex.test(d.expectedEmail), {
 		message: 'Invalid sender email (must be a full email or a domain like @fasanara.com)',
