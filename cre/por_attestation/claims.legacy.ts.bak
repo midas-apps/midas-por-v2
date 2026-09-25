@@ -5,7 +5,6 @@
 import { ObjectClaim, NumericClaim, StringClaim, createVlayerProof } from '@save/core'
 import type { CreConsensusProofData } from '@save/core'
 import type { VlayerVerificationResult, OneTokenReportData, OraclePriceData, OnchainSupplyData } from './api.js'
-import type { AttachmentNavData } from '../library/utils.js'
 
 /**
  * Ops claim data pushed by the Midas ops team to IPFS
@@ -47,35 +46,6 @@ export function createOpsClaimObject(opsClaimData: OpsClaimData): ObjectClaim {
 }
 
 /**
- * Create object claim for a custodian holdings export attached to the fund manager email.
- *
- * Parallel to `createFundManagerEmailClaim`, for the second notarised session: the email
- * proves who wrote, this proves what they sent. Both are needed — see the batch verification
- * note in `api.ts`.
- */
-export function createFundManagerAttachmentClaim(
-	vlayerVerificationResult: VlayerVerificationResult,
-	rawProofData: any,
-): ObjectClaim {
-	const tlsNotaryProof = createVlayerProof({
-		proofData: rawProofData,
-		serverDomain: vlayerVerificationResult.serverDomain,
-		notaryKeyFingerprint: vlayerVerificationResult.notaryKeyFingerprint,
-	})
-
-	// Same reason as the email claim: vlayer v2 no longer returns `success` inside `data`,
-	// so storing it would make re-verification see a phantom field and fail canonicalisation.
-	const { success: _drop, ...claimData } = vlayerVerificationResult
-	return new ObjectClaim({
-		id: 'fund_manager_attachment_claim',
-		format: 'json',
-		data: claimData as unknown as Record<string, unknown>,
-		description: 'Custodian holdings export attached to the fund manager email (Vlayer TLS verified)',
-		proof: tlsNotaryProof,
-	})
-}
-
-/**
  * Create object claim for the on-chain oracle price
  */
 export function createOraclePriceObjectClaim(
@@ -112,77 +82,113 @@ export function createOraclePriceNumericClaim(): NumericClaim {
 }
 
 /**
- * Create the overcollateralization claim — GROSS reserve ≥ TVL, USD-denominated.
- *
- * All inputs are already USD-converted by the caller: `oraclePriceUSD` includes the
- * `oracleQuoteFeed` conversion for non-USD oracles (mHyperBTC/BTC, mGLOeuro/EUR), and
- * `grossReserveUSD` is the selected reserve. The claim is self-consistent:
- *   ratio = navPerToken / oraclePriceUSD = grossReserveUSD / (grossSupplyTokens × oraclePriceUSD)
- * Verifiers read `overcollateralization#/ratio` (unchanged) → proof-compatible, no verifier change.
- *
- * `overcollateralizationType` is consumed by the Midas frontend site — do NOT rename or drop
- * it. As of 2026-09, its value is intentionally generic (`method-1` / `method-2` only): the
- * specific source (vlayer email, 1token, ops...) is no longer exposed in the public claim, to
- * avoid leaking which upstream method backed a given reserve figure. The detailed breakdown
- * fields below (`fundManagerNavUSD`, `oneTokenOnchainAUM`, etc. — whichever are non-null) still
- * let a reader infer composition without an explicit label.
+ * Create overcollateralization claim using backoffice NAV data (internal fallback).
+ * Supply is from the ops claim (placeholder until Midas supply explorer API is available).
+ * Formula: navUsed / totalSupplyTokens / oraclePriceUSD > threshold
  */
-export function createOvercollateralizationClaim(args: {
-	grossReserveUSD: number
-	grossSupplyTokens: number
-	oraclePriceUSD: number
-	tvlUSD: number
-	ratio: number
-	threshold: number
-	aumSource: string
-	opsClaimData: OpsClaimData
-	oracleRawPrice: number
-	quoteRate: number
-	emailNavUSD: number | null
-	oneTokenOnchainAUMUSD: number | null
-	onchainReserveUSD: number
-}): ObjectClaim {
-	const navPerToken = args.grossSupplyTokens > 0 ? args.grossReserveUSD / args.grossSupplyTokens : 0
+export function createInternalOvercollateralizationClaim(
+	opsClaimData: OpsClaimData,
+	oraclePriceData: OraclePriceData,
+	threshold: number,
+): ObjectClaim {
+	const navUsed = parseFloat(opsClaimData.navReportedByOps)
+	const totalSupplyTokens = Number(BigInt(opsClaimData.totalSupplyCrossChainReportedByOps)) / 1e18
+	const navPerToken = totalSupplyTokens > 0 ? navUsed / totalSupplyTokens : 0
+	const oraclePriceUSD = Number(oraclePriceData.answer) / Math.pow(10, oraclePriceData.decimals)
+	const ratio = oraclePriceUSD > 0 ? navPerToken / oraclePriceUSD : 0
 
 	const data: Record<string, unknown> = {
-		overcollateralizationType: args.aumSource,
-		// ─── ratio math (gross, USD) ───
-		totalReserveGrossUSD: args.grossReserveUSD.toFixed(2),
-		supplyTokens: args.grossSupplyTokens.toFixed(6),
-		tvlUSD: args.tvlUSD.toFixed(2),
-		oraclePriceUSD: args.oraclePriceUSD.toFixed(9),
-		oraclePriceFormatted: args.oraclePriceUSD.toFixed(9),   // alias (frontend/verifier)
+		overcollateralizationType: 'method-2',
+		// ─── frontend display (gross) ───
+		// ─── ratio math (net) ───
+		totalReserveNetUSD: navUsed.toFixed(2),
+		supplyTokensNet: totalSupplyTokens.toFixed(6),
+		// ─── legacy fields (kept for backward compatibility with existing verifiers) ───
+		totalReserveUSD: navUsed.toFixed(2),          // alias of totalReserveNetUSD
+		supplyTokens: totalSupplyTokens.toFixed(6),    // alias of supplyTokensNet
+		navReportedByOps: opsClaimData.navReportedByOps,
+		totalSupplyCrossChainReportedByOps: opsClaimData.totalSupplyCrossChainReportedByOps,
+		totalSupplyTokens: totalSupplyTokens.toFixed(6),
 		navPerToken: navPerToken.toFixed(6),
-		threshold: args.threshold,
-		ratio: parseFloat(args.ratio.toFixed(6)),
-		passed: args.ratio > args.threshold,
-		// ─── legacy aliases (backward compatibility with existing frontend/verifiers) ───
-		// Gross model: net == gross (no pending subtraction), so net aliases mirror the gross values.
-		totalReserveUSD: args.grossReserveUSD.toFixed(2),
-		totalReserveNetUSD: args.grossReserveUSD.toFixed(2),
-		supplyTokensNet: args.grossSupplyTokens.toFixed(6),
-		totalSupplyTokens: args.grossSupplyTokens.toFixed(6),
-		totalSupplyCrossChainReportedByOps: args.opsClaimData.totalSupplyCrossChainReportedByOps,
-		navReportedByOps: args.opsClaimData.navReportedByOps,
+		oraclePriceFormatted: oraclePriceUSD.toFixed(9),
+		threshold,
+		ratio: parseFloat(ratio.toFixed(6)),
+		passed: ratio > threshold,
 	}
+	if (opsClaimData.navReportedByOpsGross != null) {
+		data.totalReserveGrossUSD = opsClaimData.navReportedByOpsGross
+	}
+	return new ObjectClaim({
+		id: 'overcollateralization',
+		format: 'json',
+		data,
+		description: 'Overcollateralization verification',
+		proof: CRE_CONSENSUS_PROOF,
+	})
+}
 
-	// Non-USD oracle: expose the raw oracle price + quote-feed rate (currency conversion, not a
-	// reserve source) so the USD figures stay auditable for BTC/EUR-denominated tokens.
-	if (args.quoteRate !== 1) {
-		data.oracleRawPrice = args.oracleRawPrice.toFixed(9)
-		data.oracleQuoteRate = args.quoteRate.toFixed(9)
+/**
+ * Create overcollateralization claim using external AUM data.
+ * totalAUM and aumSource are pre-computed by the caller.
+ */
+export function createExternalOvercollateralizationClaim(
+	totalAUM: number,
+	aumSource: string,
+	opsClaimData: OpsClaimData,
+	oraclePriceData: OraclePriceData,
+	threshold: number,
+	supplyTokens: number,
+	supplySource: 'method-1' | 'method-2',
+	pendingRedemptionUSD: number,
+	oneTokenOnchainAUM: number | null,
+	emailNavUSD: number | null,
+	onchainReserveUSD: number = 0,
+	supplyExclusionsOnchainTokens: number = 0,
+): ObjectClaim {
+	const navPerToken = supplyTokens > 0 ? totalAUM / supplyTokens : 0
+	const oraclePriceUSD = Number(oraclePriceData.answer) / Math.pow(10, oraclePriceData.decimals)
+	const ratio = oraclePriceUSD > 0 ? navPerToken / oraclePriceUSD : 0
+
+	const totalSupplyTokens = Number(BigInt(opsClaimData.totalSupplyCrossChainReportedByOps)) / 1e18
+	const pendingTokens = oraclePriceUSD > 0 ? pendingRedemptionUSD / oraclePriceUSD : 0
+	const supplyTokensGross = supplyTokens + supplyExclusionsOnchainTokens + pendingTokens
+	const data: Record<string, unknown> = {
+		overcollateralizationType: 'method-1',
+		// ─── frontend display (gross) ───
+		totalReserveGrossUSD: (totalAUM + pendingRedemptionUSD).toFixed(2),
+		supplyTokens: supplyTokensGross.toFixed(6),    // raw on-chain totalSupply (matches ERC20 totalSupply(), for TVL display)
+		// ─── ratio math (net) ───
+		totalReserveNetUSD: totalAUM.toFixed(2),
+		supplyTokensNet: supplyTokens.toFixed(6),      // effective supply after LP exclusions + pending (used in ratio)
+		// ─── legacy fields (kept for backward compatibility) ───
+		totalReserveUSD: totalAUM.toFixed(2),          // alias of totalReserveNetUSD
+		oneTokenAUM: totalAUM.toFixed(2),              // alias of totalReserveNetUSD
+		pendingRedemptionUSD: pendingRedemptionUSD.toFixed(2),
+		totalSupplyCrossChainReportedByOps: opsClaimData.totalSupplyCrossChainReportedByOps,
+		totalSupplyTokens: totalSupplyTokens.toFixed(6),
+		navPerToken: navPerToken.toFixed(6),
+		oraclePriceFormatted: oraclePriceUSD.toFixed(9),
+		threshold,
+		ratio: parseFloat(ratio.toFixed(6)),
+		passed: ratio > threshold,
 	}
-	// Reserve breakdown — consumed by the Midas frontend to display the composition per source.
-	if (args.emailNavUSD !== null && args.emailNavUSD > 0) data.fundManagerNavUSD = args.emailNavUSD.toFixed(2)
-	if (args.oneTokenOnchainAUMUSD !== null) data.oneTokenOnchainAUM = args.oneTokenOnchainAUMUSD.toFixed(2)
-	if (args.onchainReserveUSD > 0) data.onchainReserveWalletsUSD = args.onchainReserveUSD.toFixed(2)
-	if (args.opsClaimData.navReportedByOpsGross != null) data.opsGrossReserveNative = args.opsClaimData.navReportedByOpsGross
+	// Breakdown of the total reserve so the frontend / auditor can inspect each source separately.
+	if (oneTokenOnchainAUM !== null) data.oneTokenOnchainAUM = oneTokenOnchainAUM.toFixed(2)
+	if (emailNavUSD !== null && emailNavUSD > 0) data.fundManagerNavUSD = emailNavUSD.toFixed(2)
+
+	// On-chain reserve total — USDC + other-token balances queried live via
+	// balanceOf() at attestation time. Auditable via on-chain state at the
+	// attestation block.
+	if (onchainReserveUSD > 0) data.onchainReserveWalletsUSD = onchainReserveUSD.toFixed(2)
+	// Supply exclusion total — sum of primary-token balances subtracted from
+	// raw totalSupply (non-circulating vaults / LP with pending burn).
+	if (supplyExclusionsOnchainTokens > 0) data.supplyExclusionsOnchainTokens = supplyExclusionsOnchainTokens.toFixed(6)
 
 	return new ObjectClaim({
 		id: 'overcollateralization',
 		format: 'json',
 		data,
-		description: 'Overcollateralization verification (gross reserve ≥ TVL, USD)',
+		description: 'Overcollateralization verification',
 		proof: CRE_CONSENSUS_PROOF,
 	})
 }
@@ -242,36 +248,6 @@ export function createEmailNavExtractedClaim(navUSD: number, navIsTotal: boolean
 		description: navIsTotal
 			? 'Total NAV reported by fund manager, vlayer-notarized via TLS proof (cross-check against 1token). navFields lists the email line labels summed to obtain navUSD.'
 			: 'NAV portion reported by fund manager, vlayer-notarized via TLS proof (additive to 1token; may include CEX, OTC, fund shares, or any value the fund manager surfaces in the email). navFields lists the email line labels summed to obtain navUSD.',
-		proof: CRE_CONSENSUS_PROOF,
-	})
-}
-
-/**
- * Create the extracted-NAV claim for custodians reporting through a tabular attachment.
- *
- * Deliberately reuses the `email_nav` id so the existing `fund_manager_total_nav` pointer
- * (`email_nav#/navUSD`) keeps resolving and verifiers need no change. The provenance fields
- * differ: columns summed and rows covered, instead of email line labels.
- */
-export function createAttachmentNavExtractedClaim(
-	nav: AttachmentNavData,
-	navIsTotal: boolean,
-	columns: readonly string[],
-): ObjectClaim {
-	return new ObjectClaim({
-		id: 'email_nav',
-		format: 'json',
-		data: {
-			navUSD: nav.navUSD,
-			navIsTotal,
-			navColumns: [...columns],
-			rowCount: nav.rowCount,
-			columnTotals: nav.columnTotals,
-			...(nav.asOfDate !== undefined ? { asOfDate: nav.asOfDate } : {}),
-		},
-		description: navIsTotal
-			? 'Total NAV reported by the custodian in a vlayer-notarized attachment. navColumns lists the columns summed across rowCount holdings to obtain navUSD; columnTotals gives the per-column breakdown.'
-			: 'NAV portion reported by the custodian in a vlayer-notarized attachment (additive to 1token). navColumns lists the columns summed across rowCount holdings to obtain navUSD; columnTotals gives the per-column breakdown.',
 		proof: CRE_CONSENSUS_PROOF,
 	})
 }
@@ -344,34 +320,25 @@ export function createEmailReceiverClaim(
 		'/response/@parseJson(body)/payload/headers'
 	) as Array<{ name: string; value: string }>
 
-	// Look across To and Cc. Custodians commonly address the operations contact directly and
-	// copy the notarised mailbox — Northern Trust put emeric@midas.app in To and
-	// midas@vlayer.xyz in Cc — so reading To alone rejects a perfectly valid report. Both
-	// headers are inside the same TLS proof, so neither is less attested than the other.
-	const recipientHeaders = headers
-		.map((h, index) => ({ h, index }))
-		.filter(({ h }) => h.name === 'To' || h.name === 'Cc')
-	if (recipientHeaders.length === 0) throw new Error('No To or Cc header found in email')
+	const toHeader = headers.find((h) => h.name === 'To')
+	if (!toHeader) throw new Error('To header not found in email')
 
-	// Pin the header that actually carries the required address: the claim's pointer must
-	// resolve to the value a verifier will re-check, not to a sibling header that happens to
-	// come first.
-	const match = recipientHeaders.find(({ h }) =>
-		parseRecipientEmails(h.value).some(e => e.toLowerCase() === requiredReceiverEmail.toLowerCase())
-	)
-	if (!match) {
-		const seen = recipientHeaders.flatMap(({ h }) => parseRecipientEmails(h.value))
+	const recipientEmails = parseRecipientEmails(toHeader.value)
+	const hasRequired = recipientEmails.some(e => e.toLowerCase() === requiredReceiverEmail.toLowerCase())
+	if (!hasRequired) {
 		throw new Error(
 			`Email receiver verification failed: required recipient ${requiredReceiverEmail} not found. ` +
-			`Got: ${seen.join(', ')}`
+			`Got: ${recipientEmails.join(', ')}`
 		)
 	}
 	// Additional recipients beyond allowedReceiverEmails are tolerated — only requiredReceiverEmail is enforced
 
+	const toHeaderIndex = headers.findIndex((h) => h.name === 'To')
+
 	return StringClaim.sourceBacked({
 		id: 'fund_manager_email_receiver_verification',
-		dataPointer: `fund_manager_claim#/response/@parseJson(body)/payload/headers/${match.index}/value`,
-		expectedValue: match.h.value,
+		dataPointer: `fund_manager_claim#/response/@parseJson(body)/payload/headers/${toHeaderIndex}/value`,
+		expectedValue: toHeader.value,
 		description: 'Verification of the email receiver in the Vlayer TLS proof',
 	})
 }
