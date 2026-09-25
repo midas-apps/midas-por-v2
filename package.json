@@ -8,8 +8,11 @@
     "cre/por_verification"
   ],
   "resolutions": {
-    "ws": "8.20.1",
-    "zod": "3.25.76"
+    "zod": "3.25.76",
+    "axios": "1.18.0",
+    "form-data": "4.0.6",
+    "ws": "8.21.0",
+    "viem": "2.54.0"
   },
   "scripts": {
     "build": "yarn workspaces foreach -Apt run build",
