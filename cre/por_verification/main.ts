@@ -309,8 +309,13 @@ const runWorkflow = async (
 			httpClient: new CreHttpClient(runtime),
 		}
 
+		// Keyed on the proof mechanism, not on a claim id. Attestations can now carry more than
+		// one TLS-notarised claim (`fund_manager_claim` for the email, plus
+		// `fund_manager_attachment_claim` when the custodian reports in an attachment), and any
+		// future one must work without touching this. Missing credentials would make save-core
+		// report those claims Invalid, which stops the whole verification from being published.
 		const hasVlayerClaim = Array.isArray(attestationData?.claims) &&
-			attestationData.claims.some((c: any) => c.id === 'fund_manager_claim')
+			attestationData.claims.some((c: any) => c?.proof?.mechanism === 'zk_tls_notary')
 
 		if (hasVlayerClaim && runtime.config.vlayerEndpoint) {
 			const vlayerAuthToken = runtime.getSecret({ id: 'vlayerauthtokenv2' }).result().value as string

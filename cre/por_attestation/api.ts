@@ -171,6 +171,151 @@ export async function verifyClaimWithVlayer(
 	return result
 }
 
+const VLAYER_BATCH_URL = 'https://web-prover.production.vlayer.xyz/api/v2.0/verify-batch'
+
+/** A proof to submit for batch verification, tagged so results can be matched back. */
+export interface VlayerBatchProofInput {
+	id: string
+	proof: { data: string; version: string; meta: { notaryUrl: string } }
+}
+
+function verifyClaimsWithVlayerBatchInternal(
+	nodeRuntime: NodeRuntime<Config>,
+	inputs: readonly VlayerBatchProofInput[],
+	batchUrl: string,
+	authToken: string,
+): Record<string, VlayerVerificationResultConsensus> {
+	const headers: Record<string, string> = {
+		'Content-Type': 'application/json',
+		'Authorization': `Bearer ${authToken}`,
+	}
+
+	// Same strictness as the single-proof endpoint: only `data`, `version` and
+	// `meta.notaryUrl` are accepted, and IPFS-stored proofs may carry extra legacy keys.
+	const payload = {
+		proofs: inputs.map((i) => ({
+			id: i.id,
+			data: i.proof.data,
+			version: i.proof.version,
+			meta: { notaryUrl: i.proof.meta?.notaryUrl },
+		})),
+	}
+
+	const httpClient = new HTTPClient()
+	const response = httpClient.sendRequest(nodeRuntime, {
+		url: batchUrl,
+		method: 'POST' as const,
+		headers,
+		body: stringToBase64(JSON.stringify(payload)),
+		timeout: '10s',
+		cacheSettings: { store: true, maxAge: '30s' },
+	}).result()
+
+	const bodyText = response.body ? new TextDecoder().decode(response.body) : ''
+	if (response.statusCode !== 200) {
+		throw new Error(`vlayer batch verification failed with status ${response.statusCode}: ${bodyText.slice(0, 300)}`)
+	}
+
+	const parsed = JSON.parse(bodyText)
+	// A 200 only means the batch was processed — each proof carries its own verdict.
+	if (!parsed.success) {
+		const code = parsed.error?.code ?? 'UNKNOWN'
+		const msg = parsed.error?.message ?? 'no message'
+		throw new Error(`vlayer batch rejected: ${code} — ${msg}`)
+	}
+
+	const results = parsed.data?.results
+	if (!Array.isArray(results) || results.length !== inputs.length) {
+		throw new Error(`vlayer batch returned ${Array.isArray(results) ? results.length : 'no'} results for ${inputs.length} proofs`)
+	}
+
+	const out: Record<string, VlayerVerificationResultConsensus> = {}
+	for (const r of results) {
+		// Match on `index` rather than the echoed `id`: the position is guaranteed by the
+		// API contract, so a mismatched or absent id cannot silently pair a verdict with
+		// the wrong proof.
+		const input = inputs[r.index]
+		if (!input) throw new Error(`vlayer batch returned an out-of-range index ${r.index}`)
+		if (!r.success) {
+			const code = r.error?.code ?? 'UNKNOWN'
+			const msg = r.error?.message ?? 'no message'
+			throw new Error(`vlayer verification failed for "${input.id}": ${code} — ${msg}`)
+		}
+		const d = r.data ?? {}
+		out[input.id] = {
+			success: true,
+			serverDomain: d.serverDomain,
+			notaryKeyFingerprint: d.notaryKeyFingerprint,
+			tlsTimestamp: d.tlsTimestamp,
+			request: {
+				headers: d.request.headers,
+				method: d.request.method,
+				raw: d.request.raw,
+				url: d.request.url,
+				version: d.request.version,
+			},
+			response: {
+				body: d.response.body,
+				headers: d.response.headers,
+				raw: d.response.raw,
+				status: d.response.status,
+				version: d.response.version,
+			},
+		}
+	}
+	return out
+}
+
+/**
+ * Verify several vlayer proofs in a single HTTP call, with DON consensus.
+ *
+ * Used when a fund manager's report spans more than one notarised session — e.g. Northern
+ * Trust, where the email proves the sender and a separate attachment proof carries the
+ * holdings. Verifying them one by one would cost one HTTP call each, and the workflow runs
+ * under a hard budget of 5 (`HTTPAction.CallLimit`).
+ *
+ * Fails closed: any proof reported invalid throws, so a partially-verified report can never
+ * reach the attestation.
+ */
+export async function verifyClaimsWithVlayerBatch(
+	runtime: Runtime<Config>,
+	inputs: readonly VlayerBatchProofInput[],
+): Promise<Record<string, VlayerVerificationResult>> {
+	const authToken = runtime.getSecret({ id: 'vlayerauthtokenv2' }).result().value as string
+
+	const consensus = runtime.runInNodeMode(
+		(nodeRuntime: NodeRuntime<Config>) => verifyClaimsWithVlayerBatchInternal(
+			nodeRuntime,
+			inputs,
+			VLAYER_BATCH_URL,
+			authToken,
+		),
+		consensusIdenticalAggregation<Record<string, VlayerVerificationResultConsensus>>()
+	)().result()
+
+	const out: Record<string, VlayerVerificationResult> = {}
+	for (const input of inputs) {
+		const c = consensus[input.id]
+		if (!c) throw new Error(`vlayer batch returned no result for "${input.id}"`)
+		out[input.id] = {
+			success: c.success,
+			serverDomain: c.serverDomain,
+			notaryKeyFingerprint: c.notaryKeyFingerprint,
+			tlsTimestamp: c.tlsTimestamp,
+			request: {
+				body: null,
+				headers: c.request.headers,
+				method: c.request.method,
+				raw: c.request.raw,
+				url: c.request.url,
+				version: c.request.version,
+			},
+			response: c.response,
+		}
+	}
+	return out
+}
+
 /**
  * Oracle price data from AggregatorV3Interface.latestRoundData()
  */
@@ -520,6 +665,7 @@ function fetchOneTokenReportInternal(
 	pendingPattern?: string,
 	useNavBase: boolean = false,
 	offchainEquityKeys: readonly string[] = [],
+	allowEmptyReport: boolean = false,
 ): OneTokenReportData {
 	const url = `${ONE_TOKEN_API_URL}?token=${tokenName}&timestamp=${timestamp}`
 
@@ -551,15 +697,35 @@ function fetchOneTokenReportInternal(
 	// for cached / historical responses.
 	const report = reports?.assets_by_protocol ?? reports?.assets_and_liabilities_by_protocol
 
-	if (!report || typeof report.equity?.total !== 'number') {
-		throw new Error(`1token response missing equity.total. Body: ${bodyText.slice(0, 300)}`)
+	// Two very different responses used to be conflated here.
+	//
+	// `{"reports":{}}` means 1token holds nothing for this token at this timestamp — it is not
+	// covered, or not yet. That is an absence of data and must stay an error, otherwise a token
+	// nobody tracks would silently attest as if its on-chain side were genuinely empty.
+	//
+	// A full report whose totals are empty (`assets_by_protocol.equity == {}`) means the
+	// opposite: the token IS tracked and simply holds no on-chain assets at that moment. That
+	// is a measurement worth zero, not a failure. Erroring on it threw away the whole method-1
+	// candidate and hid the fact that 1token had answered.
+	//
+	// Reading it as zero is also the safe direction: it can only understate the reserve, which
+	// makes method-1 fail into method-2, never inflate it into a false pass.
+	//
+	// `allowEmptyReport` extends that tolerance to the fully-empty response, and is set only for
+	// off-chain funds. There, the notarised email carries the bulk of the reserve and 1token only
+	// adds the on-chain remainder, so a missing report costs that remainder and nothing more —
+	// method-1 still gets built, still gets compared, and simply fails if the shortfall matters.
+	// For a token with no fund manager, 1token IS the reserve, so its absence stays an error
+	// rather than a reserve of zero that would fail for a misleading reason.
+	if (!report && !allowEmptyReport) {
+		throw new Error(`1token returned no portfolio report for this snapshot. Body: ${bodyText.slice(0, 300)}`)
 	}
 
 	// Return only numeric fields to avoid null values crashing the CRE WASM serializer
 	const sanitize = (obj: Record<string, unknown>): Record<string, number> =>
 		Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, typeof v === 'number' ? v : 0]))
 
-	const equity = sanitize(report.equity ?? {})
+	const equity = sanitize(report?.equity ?? {})
 	// Subtract off-chain keys (default `general_wallet`) to isolate the on-chain
 	// equity. For mFONE: 72.6M total − 69.6M general_wallet = 3.03M on-chain.
 	const offchainEquity = offchainEquityKeys.reduce((acc, k) => acc + (equity[k] ?? 0), 0)
@@ -576,8 +742,8 @@ function fetchOneTokenReportInternal(
 		: undefined
 
 	return {
-		assets: sanitize(report.assets ?? {}),
-		liabilities: sanitize(report.liabilities ?? {}),
+		assets: sanitize(report?.assets ?? {}),
+		liabilities: sanitize(report?.liabilities ?? {}),
 		equity,
 		equityOnchain,
 		offchainEquity,
@@ -647,6 +813,7 @@ export function fetchOneTokenReport(
 	timestamp: string,
 	oneTokenApi: { tokenName: string; useNavBase?: boolean; offchainEquityKeys?: readonly string[] },
 	pendingPattern?: string,
+	allowEmptyReport: boolean = false,
 ): OneTokenReportData | null {
 	const offchainEquityKeys = oneTokenApi.offchainEquityKeys ?? []
 	return runtime.runInNodeMode(
@@ -657,6 +824,7 @@ export function fetchOneTokenReport(
 			pendingPattern,
 			oneTokenApi.useNavBase ?? false,
 			offchainEquityKeys,
+			allowEmptyReport,
 		),
 		consensusIdenticalAggregation<OneTokenReportData>()
 	)().result()

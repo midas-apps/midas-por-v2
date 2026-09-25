@@ -11,6 +11,7 @@ frontend/
 bun.lock
 cre/attestation_archive/
 cre/verification_archive/
+archive/
 .yarn/install-state.gz
 cre/*/binary.wasm
 cre/*/binary.wasm.br.b64
