@@ -27,6 +27,9 @@ export interface CLIOptions {
  * Load environment variables from a .env file
  */
 export function loadEnvFile(filePath: string): Record<string, string> {
+  if (filePath.includes('..') || require('path').isAbsolute(filePath)) {
+    throw new Error(`Invalid file path: ${filePath}`);
+  }
   if (!existsSync(filePath)) {
     throw new Error(`Environment file not found: ${filePath}`);
   }
