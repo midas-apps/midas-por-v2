@@ -18,10 +18,11 @@ import { decodeAbiParameters, encodeFunctionData, decodeFunctionResult, zeroAddr
 import { SaveRegistryWithClaim } from '../contracts/abi/SaveRegistryWithClaim.js'
 import { configSchema, tokenConfigSchema, type Config, type TokenConfig, getNetworkByChainSelector } from './config.js'
 import { CRE_CONFIDENCE_MAP, getBlockNumberByConfidence } from '../library/config-schemas.js'
-import { verifyClaimWithVlayer, readOraclePrice, fetchOneTokenReport, fetchSupplyDetails, fetchMidasTotalSupply, extractNavFromEmail, readOnchainTotalSupply, readErc20BalanceDecimal, fetchSolanaSupply, fetchSolanaPrice } from './api.js'
+import { verifyClaimWithVlayer, verifyClaimsWithVlayerBatch, readOraclePrice, fetchOneTokenReport, fetchSupplyDetails, fetchMidasTotalSupply, extractNavFromEmail, readOnchainTotalSupply, readErc20BalanceDecimal, fetchSolanaSupply, fetchSolanaPrice } from './api.js'
 import type { OneTokenReportData, OnchainSupplyData } from './api.js'
-import { hashToIPFSCid, ipfsCidToHash } from '../library/utils.js'
-import { fetchFromIpfs, pushToIpfsPinata, compressJson, decompressJson } from '../library/ipfs.js'
+import { hashToIPFSCid, ipfsCidToHash, extractNavFromAttachment, extractValuationDateFromEmail } from '../library/utils.js'
+import type { AttachmentNavData } from '../library/utils.js'
+import { fetchFromIpfs, pushToIpfsPinata, pinByHashPinata, compressJson, decompressJson } from '../library/ipfs.js'
 import { fetchTokenRegistry } from '../library/token-registry.js'
 import { AttestationBuilder } from '@save/core'
 import {
@@ -39,6 +40,8 @@ import {
 	createOneTokenReportClaim,
 	createOneTokenNavClaim,
 	createOnchainSupplyClaim,
+	createFundManagerAttachmentClaim,
+	createAttachmentNavExtractedClaim,
 } from './claims.js'
 
 export async function main() {
@@ -382,6 +385,12 @@ const runWorkflow = async (
 		let emailNavUSD: number | null = null
 		let emailSenderClaim: ReturnType<typeof createEmailSenderClaim> | null = null
 		let emailReceiverClaim: ReturnType<typeof createEmailReceiverClaim> | null = null
+		// Set only for custodians reporting through a tabular attachment (see `navAttachment`).
+		let fundManagerAttachmentClaim: ReturnType<typeof createFundManagerAttachmentClaim> | null = null
+		let attachmentNav: AttachmentNavData | null = null
+		// Valuation date stated inside the email, when the token declares where to find it.
+		// Drives the anchor and the staleness check, because administrators report in arrears.
+		let valuationDateISO: string | null = null
 
 		const ZERO_HASH = '0x0000000000000000000000000000000000000000000000000000000000000000'
 		const hasVlayerHash = opsClaimData.vlayerClaimHash != null && opsClaimData.vlayerClaimHash.toLowerCase() !== ZERO_HASH
@@ -398,28 +407,183 @@ const runWorkflow = async (
 			runtime.log(`Fetching Vlayer claim from IPFS: ${opsClaimData.vlayerClaimHash}`)
 			const vlayerCid = hashToIPFSCid(opsClaimData.vlayerClaimHash!)
 
-			const vlayerCompressed = runtime.runInNodeMode(
-				(nodeRuntime: NodeRuntime<Config>) => fetchFromIpfs(nodeRuntime as any, vlayerCid),
-				consensusIdenticalAggregation<Uint8Array>()
-			)().result()
+			// Retrieving the proof is best-effort. A gateway outage or throttling is an
+			// infrastructure problem, not a reserve problem, and must not sink the whole
+			// attestation: with no proof we simply build no method-1 candidate, and the
+			// candidate loop falls through to method-2:ops — a weaker but valid attestation,
+			// which beats publishing none at all.
+			// Verification below stays deliberately fatal. A proof we DID retrieve but that
+			// fails to verify is a red flag, and quietly downgrading it to method-2 would bury
+			// exactly the signal worth surfacing.
+			let vlayerClaimData: any = null
+			try {
+				const vlayerCompressed = runtime.runInNodeMode(
+					(nodeRuntime: NodeRuntime<Config>) => fetchFromIpfs(nodeRuntime as any, vlayerCid),
+					consensusIdenticalAggregation<Uint8Array>()
+				)().result()
+				vlayerClaimData = decompressJson(vlayerCompressed)
+				if (!vlayerClaimData?.proof) throw new Error('missing proof field')
 
-			const vlayerClaimData = decompressJson(vlayerCompressed)
-			if (!vlayerClaimData?.proof) throw new Error('Invalid Vlayer claim: missing proof')
+				// Claim this proof on our own Pinata account so the dedicated gateway serves it
+				// on later runs instead of answering 403 and pushing us onto public gateways.
+				// Fund-manager emails are monthly, so the same CID is referenced for weeks: one
+				// pin spares every subsequent daily run. pinByHashPinata swallows its own
+				// failures, so a Pinata outage cannot cost the attestation.
+				if (runtime.config.pinFetchedVlayerProofs && runtime.config.ipfsPinataEndpoint) {
+					const pinataJwt = runtime.getSecret({ id: 'pinatajwt' }).result().value as string
+					runtime.runInNodeMode(
+						(nodeRuntime: NodeRuntime<Config>) => pinByHashPinata(nodeRuntime as any, vlayerCid, pinataJwt),
+						consensusIdenticalAggregation<boolean>()
+					)().result()
+				}
+			} catch (e) {
+				runtime.log(`WARN: vlayer claim could not be retrieved for ${tokenConfig.name} (${e instanceof Error ? e.message : String(e)}) — skipping method-1, falling through to method-2:ops`)
+				vlayerClaimData = null
+			}
 
-			runtime.log('Verifying Vlayer fund manager claim...')
-			const vlayerResult = await verifyClaimWithVlayer(runtime, vlayerClaimData.proof)
-			runtime.log('Vlayer verification successful')
+			if (vlayerClaimData) {
+				const fm = tokenConfig.fundManager!
 
-			const fm = tokenConfig.fundManager!
-			fundManagerEmailClaim = createFundManagerEmailClaim(vlayerResult, vlayerClaimData.proof)
-			emailSenderClaim = createEmailSenderClaim(fundManagerEmailClaim, fm.expectedEmail)
-			emailReceiverClaim = createEmailReceiverClaim(fundManagerEmailClaim, fm.requiredReceiverEmail, fm.allowedReceiverEmails)
+				// Custodians that report in an attachment (Northern Trust) produce two notarised
+				// sessions: the email proves who wrote, the attachment carries the figures. Both
+				// must be verified — the email alone proves no number, the attachment alone proves
+				// no sender — but one HTTP call each would breach the budget of 5, so they go in a
+				// single batch request.
+				const attachmentProof = fm.navAttachment ? vlayerClaimData.attachmentProof : null
+				let vlayerResult: Awaited<ReturnType<typeof verifyClaimWithVlayer>>
+				let attachmentResult: typeof vlayerResult | null = null
 
-			emailNavUSD = extractNavFromEmail(fundManagerEmailClaim, fm.navFields)
-			if (emailNavUSD !== null) {
-				runtime.log(`Email NAV extracted: ${emailNavUSD.toFixed(2)} USD (navIsTotal=${fm.navIsTotal})`)
-			} else {
-				runtime.log(`WARN: could not extract NAV from email (navFields=${JSON.stringify(fm.navFields)})`)
+				if (attachmentProof) {
+					runtime.log('Verifying Vlayer email + attachment proofs (batch)...')
+					const batch = await verifyClaimsWithVlayerBatch(runtime, [
+						{ id: 'email', proof: vlayerClaimData.proof },
+						{ id: 'attachment', proof: attachmentProof },
+					])
+					vlayerResult = batch['email']
+					attachmentResult = batch['attachment']
+				} else {
+					runtime.log('Verifying Vlayer fund manager claim...')
+					vlayerResult = await verifyClaimWithVlayer(runtime, vlayerClaimData.proof)
+				}
+				runtime.log('Vlayer verification successful')
+
+				fundManagerEmailClaim = createFundManagerEmailClaim(vlayerResult, vlayerClaimData.proof)
+				emailSenderClaim = createEmailSenderClaim(fundManagerEmailClaim, fm.expectedEmail)
+				emailReceiverClaim = createEmailReceiverClaim(fundManagerEmailClaim, fm.requiredReceiverEmail, fm.allowedReceiverEmails)
+
+				// The date the fund was actually valued, as stated in the mail. Read before the
+				// NAV because it anchors everything downstream: supply, 1token snapshot and the
+				// staleness check all have to describe the same moment as the reserve figure.
+				if (fm.valuationDate) {
+					const emailBody = fundManagerEmailClaim.resolve(
+						'/response/@parseJson(body)/payload/parts/0/body/@decodeBase64(data)'
+					) as unknown
+					valuationDateISO = typeof emailBody === 'string'
+						? extractValuationDateFromEmail(emailBody, fm.valuationDate.label, fm.valuationDate.format)
+						: null
+					if (valuationDateISO !== null) {
+						runtime.log(`Valuation date from email ("${fm.valuationDate.label}"): ${valuationDateISO}`)
+					} else {
+						// Configured but unreadable: the administrator changed their wording or
+						// format. Anchoring on the send date instead would silently compare a
+						// months-old reserve against a current supply, so stop using the email.
+						runtime.log(`WARN: ${tokenConfig.name} declares valuationDate.label="${fm.valuationDate.label}" but it could not be read from the email — skipping method-1, falling through to method-2:ops`)
+					}
+				}
+
+				if (attachmentResult && fm.navAttachment) {
+					fundManagerAttachmentClaim = createFundManagerAttachmentClaim(attachmentResult, attachmentProof)
+					// Read the holdings out of the VERIFIED response, never out of the claim's
+					// plaintext `data` field: that copy is convenient but is covered by no proof
+					// we check, so trusting it would let a fabricated total through.
+					const tsv = fundManagerAttachmentClaim.resolve('/response/@parseJson(body)/@decodeBase64(data)') as unknown
+					attachmentNav = typeof tsv === 'string'
+						? extractNavFromAttachment(tsv, fm.navAttachment.columns, fm.navAttachment.asOfColumn)
+						: null
+					if (attachmentNav) {
+						emailNavUSD = attachmentNav.navUSD
+						runtime.log(`Attachment NAV extracted: ${emailNavUSD.toFixed(2)} USD over ${attachmentNav.rowCount} rows (columns=${JSON.stringify(fm.navAttachment.columns)}, asOf=${attachmentNav.asOfDate ?? 'n/a'}, navIsTotal=${fm.navIsTotal})`)
+					} else {
+						runtime.log(`WARN: could not extract NAV from the attachment for ${tokenConfig.name} (columns=${JSON.stringify(fm.navAttachment.columns)}) — falling through to method-2:ops`)
+					}
+				} else {
+					emailNavUSD = fm.navFields ? extractNavFromEmail(fundManagerEmailClaim, fm.navFields) : null
+					if (emailNavUSD !== null) {
+						runtime.log(`Email NAV extracted: ${emailNavUSD.toFixed(2)} USD (navIsTotal=${fm.navIsTotal})`)
+					}
+				}
+
+				// Fail closed: a token that declares a valuation date but whose email no longer
+				// carries one must not fall back to the send date. That is precisely the case
+				// where the two differ by weeks.
+				if (fm.valuationDate && valuationDateISO === null) emailNavUSD = null
+
+				if (emailNavUSD !== null) {
+					// Freshness guard. What matters is not how old the valuation is — a fund that
+					// values monthly and publishes seven weeks later is *always* ~54 days behind,
+					// and that is normal — but whether this is the report the current oracle price
+					// was struck from. Midas pushes the price a day or so after each report lands,
+					// so an email that precedes the oracle update by a short margin is the one in
+					// force; one that precedes it by weeks has been superseded.
+					//
+					// Tokens that state a valuation date are checked this way. The others keep the
+					// absolute-age check, since without a stated valuation date the send date is
+					// the only signal available.
+					const emailHeaders = fundManagerEmailClaim.resolve('/response/@parseJson(body)/payload/headers') as Array<{ name: string; value: string }>
+					const emailDateHeader = emailHeaders.find(h => h.name === 'Date')
+					const sentAt = emailDateHeader ? new Date(emailDateHeader.value) : null
+
+					if (valuationDateISO !== null) {
+						if (sentAt === null || isNaN(sentAt.getTime())) {
+							runtime.log(`WARN: ${tokenConfig.name} email has no usable Date header, cannot tell whether it backs the current price — invalidating NAV candidate`)
+							emailNavUSD = null
+						} else {
+							// Negative means the price predates the mail: the oracle has not yet
+							// caught up with this report, so the reserve and the price describe
+							// different valuations.
+							const leadDays = (oraclePriceData.updatedAt * 1000 - sentAt.getTime()) / 86_400_000
+							const maxLeadDays = fm.maxEmailStalenessDays
+							if (leadDays < 0 || leadDays > maxLeadDays) {
+								runtime.log(`WARN: ${tokenConfig.name} report (valuation ${valuationDateISO.slice(0, 10)}, sent ${sentAt.toISOString()}) does not back the current oracle price (updated ${new Date(oraclePriceData.updatedAt * 1000).toISOString()}, lead ${leadDays.toFixed(1)}d, allowed 0-${maxLeadDays}d) — invalidating NAV candidate, falling through to method-2:ops`)
+								emailNavUSD = null
+							} else {
+								runtime.log(`Report backs the current price: valuation ${valuationDateISO.slice(0, 10)}, oracle updated ${leadDays.toFixed(1)}d after the mail`)
+							}
+						}
+					} else {
+						// No stated valuation date: fall back to absolute age. For attachment
+						// reports the as-of column is what counts, not when the mail was sent —
+						// re-sending last month's export would otherwise look fresh.
+						let reportDate: Date | null = null
+						let dateSource = ''
+						if (attachmentNav?.asOfDate) {
+							reportDate = new Date(attachmentNav.asOfDate)
+							dateSource = `attachment as-of ${attachmentNav.asOfDate}`
+						} else if (sentAt) {
+							reportDate = sentAt
+							dateSource = `email sent ${emailDateHeader!.value}`
+						}
+
+						if (reportDate === null) {
+							runtime.log(`WARN: no date available to check staleness — invalidating NAV candidate for ${tokenConfig.name}`)
+							emailNavUSD = null
+						} else if (isNaN(reportDate.getTime())) {
+							runtime.log(`WARN: unparseable report date (${dateSource}) — invalidating NAV candidate for ${tokenConfig.name}`)
+							emailNavUSD = null
+						} else {
+							const ageDays = (new Date(opsClaimData.createdAt).getTime() - reportDate.getTime()) / 86_400_000
+							const maxAgeDays = fm.maxEmailStalenessDays
+							if (ageDays > maxAgeDays) {
+								runtime.log(`WARN: ${tokenConfig.name} fund manager report is ${ageDays.toFixed(1)} days old (${dateSource}), exceeds maxEmailStalenessDays=${maxAgeDays} — invalidating NAV candidate, falling through to method-2:ops`)
+								emailNavUSD = null
+							} else {
+								runtime.log(`Report staleness OK: ${ageDays.toFixed(1)} days old (${dateSource}, max ${maxAgeDays})`)
+							}
+						}
+					}
+				} else if (!fm.navAttachment) {
+					runtime.log(`WARN: could not extract NAV from email (navFields=${JSON.stringify(fm.navFields)})`)
+				}
 			}
 		}
 
@@ -480,9 +644,23 @@ const runWorkflow = async (
 					return { iso: opsTs.toISOString(), rule: `ops_created_at_${sign}_${Math.abs(offsetHours)}h` }
 				}
 				try {
-					const r = resolvedAnchor.source === 'vlayer_email_date'
-						? tryVlayerEmailDate(resolvedAnchor.offsetHours)
-						: opsCreatedAt(resolvedAnchor.offsetHours)
+					// A stated valuation date outranks every derived one, including an explicit
+					// anchorRule: it is the moment the reserve figure actually describes, and the
+					// oracle price is struck from that same valuation. Supply and the 1token
+					// snapshot must therefore describe it too, or the ratio compares a reserve
+					// from one date against a token supply from another.
+					//
+					// Custodian attachments carry the same information in their as-of column, so
+					// they anchor the same way — the date the holdings were struck, not the date
+					// the mail happened to be sent.
+					const statedDateISO = valuationDateISO ?? (attachmentNav?.asOfDate
+						? new Date(`${attachmentNav.asOfDate}T23:59:59Z`).toISOString()
+						: null)
+					const r = statedDateISO
+						? { iso: statedDateISO, rule: valuationDateISO ? 'vlayer_valuation_date' : 'attachment_as_of_date' }
+						: resolvedAnchor.source === 'vlayer_email_date'
+							? tryVlayerEmailDate(resolvedAnchor.offsetHours)
+							: opsCreatedAt(resolvedAnchor.offsetHours)
 					anchorISO = r.iso
 					anchorRule = r.rule
 				} catch (e) {
@@ -509,9 +687,18 @@ const runWorkflow = async (
 							runtime.log(`1token "${ts}" error: ${e instanceof Error ? e.message : String(e)}`)
 							continue
 						}
-						if (!report || typeof report.equity?.total !== 'number') {
+						// Only absence is a miss. A report that came back with empty totals is a
+						// real answer — the token is tracked and held nothing on-chain at that
+						// snapshot — and `api.ts` has already rejected the genuinely-empty
+						// `{"reports":{}}` case by throwing. Re-testing `equity.total` here
+						// discarded those zero answers and left the whole method-1 candidate
+						// unbuilt, which is how mWIN lost its independent check.
+						if (!report) {
 							runtime.log(`1token "${ts}" no data — trying next`)
 							continue
+						}
+						if (typeof report.equity?.total !== 'number') {
+							runtime.log(`1token "${ts}": report present with no holdings — reading on-chain AUM as 0`)
 						}
 						oneTokenRawReport = report
 						oneTokenTimestamp = ts
@@ -648,46 +835,63 @@ const runWorkflow = async (
 				runtime.log('Gross supply: Midas endpoint unavailable — using ops-reported supply')
 			}
 		}
-		const tvlUSD = grossSupplyTokens * oraclePriceUSD
+		// A ratio only means something when its reserve and its supply describe the same moment,
+		// and the two methods describe different ones. Method-1's reserve is struck at the fund's
+		// valuation date, so it is divided by the supply read at that date. Method-2's reserve is
+		// whatever ops computed at claim time, so it is divided by the supply ops themselves
+		// reported. Sharing one TVL across both silently compares a reserve from one date against
+		// a supply from another: on mGLOBAL that turned 2.3M tokens minted since the valuation
+		// into a phantom 3.57% of overcollateralization.
+		const anchoredTvlUSD = grossSupplyTokens * oraclePriceUSD
+		const opsTvlUSD = totalSupplyTokens * oraclePriceUSD
 
 		// Gross reserve candidates (all USD). First above threshold wins.
 		const opsGrossUSD = (opsClaimData.navReportedByOpsGross != null
 			? parseFloat(opsClaimData.navReportedByOpsGross)
 			: parseFloat(opsClaimData.navReportedByOps)) * quoteRate
 
-		const candidates: Array<{ grossReserveUSD: number; aumSource: string; supplySource: 'method-1' | 'method-2' }> = []
-		if (fm?.navIsTotal && emailNavUSD !== null) {
-			candidates.push({ grossReserveUSD: emailNavUSD + onchainReserveUSD, aumSource: 'method-1:vlayer_total', supplySource: 'method-1' })
-		} else if (fm && !fm.navIsTotal && emailNavUSD !== null && oneTokenOnchainAUMUSD !== null) {
-			candidates.push({ grossReserveUSD: emailNavUSD + oneTokenOnchainAUMUSD + onchainReserveUSD, aumSource: 'method-1:vlayer+1token', supplySource: 'method-1' })
-		} else if (!fm && oneTokenOnchainAUMUSD !== null) {
-			candidates.push({ grossReserveUSD: oneTokenOnchainAUMUSD + onchainReserveUSD, aumSource: 'method-1:1token', supplySource: 'method-1' })
+		type Candidate = {
+			grossReserveUSD: number
+			aumSource: string
+			supplySource: 'method-1' | 'method-2'
+			supplyTokens: number
+			tvlUSD: number
 		}
-		candidates.push({ grossReserveUSD: opsGrossUSD, aumSource: 'method-2:ops', supplySource: 'method-2' })
+		const candidates: Candidate[] = []
+		if (fm?.navIsTotal && emailNavUSD !== null) {
+			candidates.push({ grossReserveUSD: emailNavUSD + onchainReserveUSD, aumSource: 'method-1:vlayer_total', supplySource: 'method-1', supplyTokens: grossSupplyTokens, tvlUSD: anchoredTvlUSD })
+		} else if (fm && !fm.navIsTotal && emailNavUSD !== null && oneTokenOnchainAUMUSD !== null) {
+			candidates.push({ grossReserveUSD: emailNavUSD + oneTokenOnchainAUMUSD + onchainReserveUSD, aumSource: 'method-1:vlayer+1token', supplySource: 'method-1', supplyTokens: grossSupplyTokens, tvlUSD: anchoredTvlUSD })
+		} else if (!fm && oneTokenOnchainAUMUSD !== null) {
+			candidates.push({ grossReserveUSD: oneTokenOnchainAUMUSD + onchainReserveUSD, aumSource: 'method-1:1token', supplySource: 'method-1', supplyTokens: grossSupplyTokens, tvlUSD: anchoredTvlUSD })
+		}
+		// Method-2 is entirely ops: their reserve against their own supply.
+		candidates.push({ grossReserveUSD: opsGrossUSD, aumSource: 'method-2:ops', supplySource: 'method-2', supplyTokens: totalSupplyTokens, tvlUSD: opsTvlUSD })
 
-		let selectedCandidate: { grossReserveUSD: number; aumSource: string; supplySource: 'method-1' | 'method-2'; ratio: number } | null = null
+		// Sanity ceiling: a candidate whose reserve exceeds on-chain TVL (supply × price) by more than
+		// 30% signals a currency mismatch (e.g. ops NAV entered in USD for a BTC/EUR token so quoteRate
+		// double-scales it), a double-count, or a bad upstream data source (e.g. 1token) — reject that
+		// candidate and fall through to the next one (down to method-2:ops) rather than attest garbage.
+		const SANITY_CEILING = 1.30
+		let selectedCandidate: (Candidate & { ratio: number }) | null = null
 		for (const c of candidates) {
-			const ratio = tvlUSD > 0 ? c.grossReserveUSD / tvlUSD : 0
-			runtime.log(`Candidate ${c.aumSource}: reserve=${c.grossReserveUSD.toFixed(0)} / TVL=${tvlUSD.toFixed(0)} (supply ${grossSupplyTokens.toFixed(2)} × ${oraclePriceUSD.toFixed(6)}) = ratio ${ratio.toFixed(4)}`)
-			if (ratio > threshold) { selectedCandidate = { grossReserveUSD: c.grossReserveUSD, aumSource: c.aumSource, supplySource: c.supplySource, ratio }; break }
+			const ratio = c.tvlUSD > 0 ? c.grossReserveUSD / c.tvlUSD : 0
+			runtime.log(`Candidate ${c.aumSource}: reserve=${c.grossReserveUSD.toFixed(0)} / TVL=${c.tvlUSD.toFixed(0)} (supply ${c.supplyTokens.toFixed(2)} × ${oraclePriceUSD.toFixed(6)}) = ratio ${ratio.toFixed(4)}`)
+			if (ratio > SANITY_CEILING) {
+				runtime.log(`Candidate ${c.aumSource} rejected: ratio ${ratio.toFixed(4)} exceeds sanity ceiling ${SANITY_CEILING} (reserve ${c.grossReserveUSD.toFixed(0)} > TVL ${c.tvlUSD.toFixed(0)} × ${SANITY_CEILING}), trying next candidate`)
+				continue
+			}
+			if (ratio > threshold) { selectedCandidate = { ...c, ratio }; break }
 		}
 
 		if (!selectedCandidate) {
 			throw new Error(
 				`Overcollateralization check failed for ${tokenConfig.name}. ` +
-				`All candidates below threshold=${threshold}. Attestation will not be pushed.`
+				`All candidates either below threshold=${threshold} or above sanity ceiling=${SANITY_CEILING}. Attestation will not be pushed.`
 			)
 		}
 
-		// Post-flight sanity: the reserve must not exceed on-chain TVL (supply × price) by more than
-		// 30%. A ratio > 1.30 signals a currency mismatch (e.g. ops NAV entered in USD for a BTC/EUR
-		// token so quoteRate double-scales it) or a double-count — reject rather than attest garbage.
-		if (selectedCandidate.ratio > 1.30) {
-			runtime.log(`Post-flight sanity FAILED: ${tokenConfig.name} ratio ${selectedCandidate.ratio.toFixed(4)} > 1.30 (reserve ${selectedCandidate.grossReserveUSD.toFixed(0)} > TVL ${tvlUSD.toFixed(0)} × 1.30), source=${selectedCandidate.aumSource}`)
-			throw new Error(`Post-flight sanity check failed for ${tokenConfig.name}: overcollateralization ratio ${selectedCandidate.ratio.toFixed(4)} exceeds 1.30 (reserve > on-chain TVL + 30%).`)
-		}
-
-		runtime.log(`Overcollateralization passed: ${selectedCandidate.aumSource}, ratio=${selectedCandidate.ratio.toFixed(4)}, supply source=${supplySource}`)
+		runtime.log(`Overcollateralization passed: ${selectedCandidate.aumSource}, ratio=${selectedCandidate.ratio.toFixed(4)}, supply=${selectedCandidate.supplyTokens.toFixed(2)} (${selectedCandidate.supplySource === 'method-2' ? 'ops-reported' : `${supplySource} @ ${oneTokenAnchorISO ?? opsClaimData.createdAt}`})`)
 
 		// 7. Build claims
 
@@ -700,12 +904,18 @@ const runWorkflow = async (
 		const oraclePriceNumericClaim = createOraclePriceNumericClaim()
 		const overcollateralizationClaim = createOvercollateralizationClaim({
 			grossReserveUSD: selectedCandidate.grossReserveUSD,
-			grossSupplyTokens,
+			// The supply and TVL of the candidate that was actually selected, so the published
+			// figures reconstruct its ratio exactly. Publishing the anchored supply alongside an
+			// ops reserve would let a reader recompute a different number than the one attested.
+			grossSupplyTokens: selectedCandidate.supplyTokens,
 			oraclePriceUSD,
-			tvlUSD,
+			tvlUSD: selectedCandidate.tvlUSD,
 			ratio: selectedCandidate.ratio,
 			threshold,
-			aumSource: selectedCandidate.aumSource,
+			// Public claim only ever says 'method-1' or 'method-2' — never the specific source
+			// (vlayer_total, ops, 1token, ...). The detailed `aumSource` stays in CRE execution
+			// logs (see the runtime.log calls above) for internal debugging only.
+			aumSource: selectedCandidate.supplySource,
 			opsClaimData,
 			oracleRawPrice: Number(oraclePriceData.answer) / Math.pow(10, oraclePriceData.decimals),
 			quoteRate,
@@ -738,7 +948,17 @@ const runWorkflow = async (
 				.addClaim(fundManagerEmailClaim)
 				.addClaim(emailSenderClaim)
 				.addClaim(emailReceiverClaim)
-			if (emailNavUSD !== null && fm) {
+			// The attachment proof is published whenever it was verified, even if the NAV could
+			// not be read from it: it is the evidence a reader needs to recompute the total, and
+			// withholding it on extraction failure would hide why the token fell back to ops.
+			if (fundManagerAttachmentClaim) {
+				attestationBuilder.addClaim(fundManagerAttachmentClaim)
+			}
+			if (emailNavUSD !== null && attachmentNav && fm?.navAttachment) {
+				attestationBuilder
+					.addClaim(createAttachmentNavExtractedClaim(attachmentNav, fm.navIsTotal, fm.navAttachment.columns))
+					.addClaim(createEmailNavNumericClaim())
+			} else if (emailNavUSD !== null && fm?.navFields) {
 				attestationBuilder
 					.addClaim(createEmailNavExtractedClaim(emailNavUSD, fm.navIsTotal, fm.navFields))
 					.addClaim(createEmailNavNumericClaim())

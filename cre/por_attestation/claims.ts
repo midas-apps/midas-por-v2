@@ -5,6 +5,7 @@
 import { ObjectClaim, NumericClaim, StringClaim, createVlayerProof } from '@save/core'
 import type { CreConsensusProofData } from '@save/core'
 import type { VlayerVerificationResult, OneTokenReportData, OraclePriceData, OnchainSupplyData } from './api.js'
+import type { AttachmentNavData } from '../library/utils.js'
 
 /**
  * Ops claim data pushed by the Midas ops team to IPFS
@@ -42,6 +43,35 @@ export function createOpsClaimObject(opsClaimData: OpsClaimData): ObjectClaim {
 		data: opsClaimData as unknown as Record<string, unknown>,
 		description: 'Ops team NAV PoR claim containing cross-chain supply and NAV data',
 		proof: CRE_CONSENSUS_PROOF,
+	})
+}
+
+/**
+ * Create object claim for a custodian holdings export attached to the fund manager email.
+ *
+ * Parallel to `createFundManagerEmailClaim`, for the second notarised session: the email
+ * proves who wrote, this proves what they sent. Both are needed — see the batch verification
+ * note in `api.ts`.
+ */
+export function createFundManagerAttachmentClaim(
+	vlayerVerificationResult: VlayerVerificationResult,
+	rawProofData: any,
+): ObjectClaim {
+	const tlsNotaryProof = createVlayerProof({
+		proofData: rawProofData,
+		serverDomain: vlayerVerificationResult.serverDomain,
+		notaryKeyFingerprint: vlayerVerificationResult.notaryKeyFingerprint,
+	})
+
+	// Same reason as the email claim: vlayer v2 no longer returns `success` inside `data`,
+	// so storing it would make re-verification see a phantom field and fail canonicalisation.
+	const { success: _drop, ...claimData } = vlayerVerificationResult
+	return new ObjectClaim({
+		id: 'fund_manager_attachment_claim',
+		format: 'json',
+		data: claimData as unknown as Record<string, unknown>,
+		description: 'Custodian holdings export attached to the fund manager email (Vlayer TLS verified)',
+		proof: tlsNotaryProof,
 	})
 }
 
@@ -90,9 +120,12 @@ export function createOraclePriceNumericClaim(): NumericClaim {
  *   ratio = navPerToken / oraclePriceUSD = grossReserveUSD / (grossSupplyTokens × oraclePriceUSD)
  * Verifiers read `overcollateralization#/ratio` (unchanged) → proof-compatible, no verifier change.
  *
- * `overcollateralizationType` and the per-source breakdown fields are consumed by the Midas
- * frontend site to display the reserve composition — do NOT rename or drop them. (The reserve
- * path is inferable from these; that is accepted for a transparent PoR display.)
+ * `overcollateralizationType` is consumed by the Midas frontend site — do NOT rename or drop
+ * it. As of 2026-09, its value is intentionally generic (`method-1` / `method-2` only): the
+ * specific source (vlayer email, 1token, ops...) is no longer exposed in the public claim, to
+ * avoid leaking which upstream method backed a given reserve figure. The detailed breakdown
+ * fields below (`fundManagerNavUSD`, `oneTokenOnchainAUM`, etc. — whichever are non-null) still
+ * let a reader infer composition without an explicit label.
  */
 export function createOvercollateralizationClaim(args: {
 	grossReserveUSD: number
@@ -214,6 +247,36 @@ export function createEmailNavExtractedClaim(navUSD: number, navIsTotal: boolean
 }
 
 /**
+ * Create the extracted-NAV claim for custodians reporting through a tabular attachment.
+ *
+ * Deliberately reuses the `email_nav` id so the existing `fund_manager_total_nav` pointer
+ * (`email_nav#/navUSD`) keeps resolving and verifiers need no change. The provenance fields
+ * differ: columns summed and rows covered, instead of email line labels.
+ */
+export function createAttachmentNavExtractedClaim(
+	nav: AttachmentNavData,
+	navIsTotal: boolean,
+	columns: readonly string[],
+): ObjectClaim {
+	return new ObjectClaim({
+		id: 'email_nav',
+		format: 'json',
+		data: {
+			navUSD: nav.navUSD,
+			navIsTotal,
+			navColumns: [...columns],
+			rowCount: nav.rowCount,
+			columnTotals: nav.columnTotals,
+			...(nav.asOfDate !== undefined ? { asOfDate: nav.asOfDate } : {}),
+		},
+		description: navIsTotal
+			? 'Total NAV reported by the custodian in a vlayer-notarized attachment. navColumns lists the columns summed across rowCount holdings to obtain navUSD; columnTotals gives the per-column breakdown.'
+			: 'NAV portion reported by the custodian in a vlayer-notarized attachment (additive to 1token). navColumns lists the columns summed across rowCount holdings to obtain navUSD; columnTotals gives the per-column breakdown.',
+		proof: CRE_CONSENSUS_PROOF,
+	})
+}
+
+/**
  * Source-backed numeric claim pointing to the extracted email NAV.
  * Keeps the main-branch claim id `fund_manager_total_nav` for backward compatibility
  * with verifiers that already parse it.
@@ -281,25 +344,34 @@ export function createEmailReceiverClaim(
 		'/response/@parseJson(body)/payload/headers'
 	) as Array<{ name: string; value: string }>
 
-	const toHeader = headers.find((h) => h.name === 'To')
-	if (!toHeader) throw new Error('To header not found in email')
+	// Look across To and Cc. Custodians commonly address the operations contact directly and
+	// copy the notarised mailbox — Northern Trust put emeric@midas.app in To and
+	// midas@vlayer.xyz in Cc — so reading To alone rejects a perfectly valid report. Both
+	// headers are inside the same TLS proof, so neither is less attested than the other.
+	const recipientHeaders = headers
+		.map((h, index) => ({ h, index }))
+		.filter(({ h }) => h.name === 'To' || h.name === 'Cc')
+	if (recipientHeaders.length === 0) throw new Error('No To or Cc header found in email')
 
-	const recipientEmails = parseRecipientEmails(toHeader.value)
-	const hasRequired = recipientEmails.some(e => e.toLowerCase() === requiredReceiverEmail.toLowerCase())
-	if (!hasRequired) {
+	// Pin the header that actually carries the required address: the claim's pointer must
+	// resolve to the value a verifier will re-check, not to a sibling header that happens to
+	// come first.
+	const match = recipientHeaders.find(({ h }) =>
+		parseRecipientEmails(h.value).some(e => e.toLowerCase() === requiredReceiverEmail.toLowerCase())
+	)
+	if (!match) {
+		const seen = recipientHeaders.flatMap(({ h }) => parseRecipientEmails(h.value))
 		throw new Error(
 			`Email receiver verification failed: required recipient ${requiredReceiverEmail} not found. ` +
-			`Got: ${recipientEmails.join(', ')}`
+			`Got: ${seen.join(', ')}`
 		)
 	}
 	// Additional recipients beyond allowedReceiverEmails are tolerated — only requiredReceiverEmail is enforced
 
-	const toHeaderIndex = headers.findIndex((h) => h.name === 'To')
-
 	return StringClaim.sourceBacked({
 		id: 'fund_manager_email_receiver_verification',
-		dataPointer: `fund_manager_claim#/response/@parseJson(body)/payload/headers/${toHeaderIndex}/value`,
-		expectedValue: toHeader.value,
+		dataPointer: `fund_manager_claim#/response/@parseJson(body)/payload/headers/${match.index}/value`,
+		expectedValue: match.h.value,
 		description: 'Verification of the email receiver in the Vlayer TLS proof',
 	})
 }

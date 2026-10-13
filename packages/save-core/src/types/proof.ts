@@ -121,10 +121,10 @@ export interface ZkTlsNotaryProofData {
 
 /**
  * CRE Consensus proof - data verified through Chainlink Runtime Environment consensus
- * 
+ *
  * Used for data fetched via CRE workflows where multiple DON nodes independently
  * execute the same operation and reach consensus on the result.
- * 
+ *
  * TODO: Add metadata fields (source, timestamp, etc.) for proof context
  */
 export interface CreConsensusProofData {

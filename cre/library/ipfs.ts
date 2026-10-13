@@ -305,3 +305,55 @@ export function pushToIpfsPinata<T extends IPFSPinataConfig>(
 
 	return result.IpfsHash
 }
+
+/**
+ * Pin an IPFS CID that already exists on Pinata's network to our own account.
+ *
+ * Our dedicated gateway only serves CIDs pinned to our account, so third-party content —
+ * notably vlayer proofs, pinned under vlayer's account — comes back 403 and the workflow is
+ * pushed onto public gateways that are slow and rate-limited. That has already cost real
+ * attestations. Claiming a reference to the CID makes the dedicated gateway serve it.
+ *
+ * No data is transferred: Pinata already holds the content, this only records that we want it
+ * kept. Pinning an already-pinned CID is a no-op, so this is safe to call on every run — and
+ * becomes exactly that, a no-op, once the claim-pushing service pins the proof upstream.
+ *
+ * Best-effort by contract: returns false on any failure rather than throwing, because failing
+ * to pin must never cost an attestation. The fallback gateways remain in place either way.
+ */
+export function pinByHashPinata<T extends IPFSPinataConfig>(
+	nodeRuntime: NodeRuntime<T>,
+	ipfsCid: string,
+	pinataJwt: string,
+	name?: string,
+): boolean {
+	try {
+		const { url: pinataUrl } = nodeRuntime.config.ipfsPinataEndpoint
+		const payload = JSON.stringify({
+			hashToPin: ipfsCid,
+			...(name ? { pinataMetadata: { name } } : {}),
+		})
+
+		const response = new HTTPClient()
+			.sendRequest(nodeRuntime, {
+				url: `${pinataUrl}/pinning/pinByHash`,
+				method: 'POST' as const,
+				headers: {
+					'Authorization': `Bearer ${pinataJwt}`,
+					'Content-Type': 'application/json',
+				},
+				body: stringToBase64(payload),
+				timeout: '10s',
+			})
+			.result()
+
+		// Pinata answers 200 on a fresh pin and 4xx when the CID is already pinned to the
+		// account; both mean the gateway will serve it, which is all we care about.
+		const ok = response.statusCode === 200 || response.statusCode === 409
+		nodeRuntime.log(`pinByHash ${ipfsCid}: HTTP ${response.statusCode}${ok ? '' : ' (ignored)'}`)
+		return ok
+	} catch (e) {
+		nodeRuntime.log(`pinByHash ${ipfsCid} failed (ignored): ${e instanceof Error ? e.message : String(e)}`)
+		return false
+	}
+}
