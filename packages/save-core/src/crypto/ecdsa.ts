@@ -2,9 +2,9 @@
  * ECDSA cryptographic utilities using secp256k1 curve
  */
 
-import { secp256k1 } from '@noble/curves/secp256k1';
-import { sha256 } from '@noble/hashes/sha2';
-import { bytesToHex, hexToBytes, randomBytes } from '@noble/hashes/utils';
+import { secp256k1 } from '@noble/curves/secp256k1.js';
+import { sha256 } from '@noble/hashes/sha2.js';
+import { bytesToHex, hexToBytes, randomBytes } from '@noble/hashes/utils.js';
 import type { HexString } from '../types/index.js';
 
 /** Ensure hex string has 0x prefix */
@@ -87,8 +87,9 @@ export function sign(data: string | Uint8Array, privateKey: HexString): HexStrin
   const dataBytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
   const hash = sha256(dataBytes);
   const privateKeyBytes = hexToBytes(stripHexPrefix(privateKey));
-  const signature = secp256k1.sign(hash, privateKeyBytes);
-  return ensureHexPrefix(bytesToHex(signature.toCompactRawBytes()));
+  // prehash: false — `hash` is already SHA-256; noble v2 would otherwise hash it again.
+  const signature = secp256k1.sign(hash, privateKeyBytes, { prehash: false });
+  return ensureHexPrefix(bytesToHex(signature));
 }
 
 /**
@@ -106,13 +107,9 @@ export function verify(
   try {
     const dataBytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
     const hash = sha256(dataBytes);
-    const signatureHex = stripHexPrefix(signature);
+    const signatureBytes = hexToBytes(stripHexPrefix(signature));
     const publicKeyBytes = hexToBytes(stripHexPrefix(publicKey));
-    
-    // Reconstruct signature from compact hex format
-    const sig = secp256k1.Signature.fromCompact(signatureHex);
-    // Verify using DER format bytes
-    return secp256k1.verify(sig.toDERRawBytes(), hash, publicKeyBytes);
+    return secp256k1.verify(signatureBytes, hash, publicKeyBytes, { prehash: false });
   } catch {
     return false;
   }
