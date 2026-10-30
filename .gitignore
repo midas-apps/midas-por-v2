@@ -17,3 +17,4 @@ cre/*/binary.wasm
 cre/*/binary.wasm.br.b64
 cre/*/.workflow-temp-*.ts
 packages/save-core/dist/
+.idea/
