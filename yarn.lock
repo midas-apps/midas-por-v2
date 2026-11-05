@@ -927,9 +927,9 @@ __metadata:
   languageName: node
   linkType: hard
 
-"ws@npm:8.20.1":
-  version: 8.20.1
-  resolution: "ws@npm:8.20.1"
+"ws@npm:8.21.0":
+  version: 8.21.0
+  resolution: "ws@npm:8.21.0"
   peerDependencies:
     bufferutil: ^4.0.1
     utf-8-validate: ">=5.0.2"
@@ -938,13 +938,13 @@ __metadata:
       optional: true
     utf-8-validate:
       optional: true
-  checksum: 10c0/ce162433218399cdedeb76fd33363d4d86a7d910058d4e3c679dce08cea65d6da6b39f11baa4d7808d024cf46ed88f6a05c17611621aaad8fc5e62edacc30c5d
+  checksum: 10c0/ef4a243476283fc49bc7550966c4af4aa0eef56273837211e700de3b664e08604a760cdddcb5ba43c049140e74ccfec5b0ee0bb439e08c2adf9138902fdde5f9
   languageName: node
   linkType: hard
 
-"zod@npm:3.25.76":
-  version: 3.25.76
-  resolution: "zod@npm:3.25.76"
-  checksum: 10c0/5718ec35e3c40b600316c5b4c5e4976f7fee68151bc8f8d90ec18a469be9571f072e1bbaace10f1e85cf8892ea12d90821b200e980ab46916a6166a4260a983c
+"zod@https://npm.aikido.io/a3a975cc852f01ed5c8f/zod@3.25.76-aikido.1.tgz":
+  version: 3.25.76-aikido.1
+  resolution: "zod@https://npm.aikido.io/a3a975cc852f01ed5c8f/zod@3.25.76-aikido.1.tgz"
+  checksum: 10c0/812e2585eaa5e38085d9199090e9a28f507e57aacef65031fdba989da13d9573fb80c636599a20562ee7d97519675ea71f6fe2ebf83affd6099fa9da78bf3359
   languageName: node
   linkType: hard
