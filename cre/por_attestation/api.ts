@@ -950,12 +950,22 @@ interface SolanaSupplyRaw { amount: string; decimals: number }
 interface SolanaFeedRaw { answerStr: string; decimals: number; updatedAt: number }
 
 function fetchSolanaSupplyInternal(nodeRuntime: NodeRuntime<Config>, rpcUrl: string, mint: string): SolanaSupplyRaw {
-	const result = solanaRpc(nodeRuntime, rpcUrl, 'getTokenSupply', [mint])
-	const v = result?.value
-	if (!v || typeof v.amount !== 'string' || typeof v.decimals !== 'number') {
-		throw new Error(`Solana getTokenSupply bad response for mint ${mint}`)
-	}
-	return { amount: v.amount, decimals: v.decimals }
+	// Read the SPL Mint account rather than calling getTokenSupply. The latter is an
+	// "indexed" method that public providers reserve for keyed clients, and `rpcUrl` lives
+	// in the public token registry so it cannot carry a key. getAccountInfo is a plain read
+	// every provider serves, and the Mint layout carries the same two figures:
+	//   mintAuthority COption[0..36) | supply u64 LE [36..44) | decimals u8 [44]
+	const result = solanaRpc(nodeRuntime, rpcUrl, 'getAccountInfo', [mint, { encoding: 'base64' }])
+	const dataField = result?.value?.data
+	const b64 = Array.isArray(dataField) ? dataField[0] : undefined
+	if (!b64) throw new Error(`Solana mint ${mint} has no data`)
+	const bytes = base64ToBytes(b64)
+	if (bytes.length < 45) throw new Error(`Solana mint ${mint} too short (${bytes.length} bytes)`)
+	let supply = 0n
+	for (let i = 0; i < 8; i++) supply += BigInt(bytes[36 + i]) << BigInt(8 * i)
+	const decimals = bytes[44]
+	if (supply <= 0n) throw new Error(`Solana mint ${mint} returned zero supply`)
+	return { amount: supply.toString(), decimals }
 }
 
 function fetchSolanaPriceInternal(nodeRuntime: NodeRuntime<Config>, rpcUrl: string, priceFeed: string): SolanaFeedRaw {
