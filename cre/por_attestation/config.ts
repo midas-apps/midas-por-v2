@@ -24,21 +24,70 @@ const attesterConfigSchema = z
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const domainRegex = /^@[^\s@]+\.[^\s@]+$/  // e.g. @fasanara.com
 
+// Some custodians do not put the NAV in the email body but in an attached tabular
+// export (e.g. Northern Trust sends a TSV holdings report). vlayer notarises the
+// attachment download as a second TLS session (`attachmentProof`), and the NAV is a
+// column to be summed over every data row rather than a labelled line.
+//
+// `columns` are summed across all rows: for Northern Trust, `A-AST-MV-BSE` is the asset
+// market value in base currency, and `A-INC-RCVBL-BSE` the accrued income receivable —
+// which of the two (or both) constitutes the NAV is a reporting decision, hence config.
+const navAttachmentSchema = z.object({
+	// Only tab-separated exports are supported today; declared explicitly so a future
+	// CSV/fixed-width variant is an additive change rather than a silent reinterpretation.
+	format: z.literal('tsv').default('tsv'),
+	columns: z.array(z.string()).min(1),
+	// Column holding the valuation date (e.g. `D-VALN-AS-OF`). When set, it is checked
+	// against maxEmailStalenessDays exactly like the email `Date` header, so a custodian
+	// re-sending an old export cannot pass as current.
+	asOfColumn: z.string().optional(),
+})
+
+export type NavAttachmentConfig = z.infer<typeof navAttachmentSchema>
+
 const fundManagerConfigSchema = z
 	.object({
 		expectedEmail: z.string(),
 		requiredReceiverEmail: z.string(),
 		allowedReceiverEmails: z.array(z.string()).default([]),
 		tokenName: z.string(),
-		navFields: z.array(z.string()).min(1),
+		// NAV read from labelled lines in the email body. Optional: tokens whose custodian
+		// reports through an attachment use `navAttachment` instead. Exactly one of the two
+		// must be present (enforced below).
+		navFields: z.array(z.string()).min(1).optional(),
+		navAttachment: navAttachmentSchema.optional(),
+		// Where the valuation date is printed in the email body, and how it is written.
+		//
+		// Fund administrators report in arrears: JTC send the 31 July valuation on 22
+		// September. Anchoring on the email's `Date` header therefore compares a reserve
+		// struck at one moment against a supply read seven weeks later, which understates
+		// the ratio by however much the token grew in between. When this is set, the stated
+		// valuation date drives both the anchor and the staleness check instead.
+		//
+		// `format` is explicit because `01/07/2026` reads as 1 July or 7 January depending
+		// on the administrator, and guessing would shift the anchor silently.
+		valuationDate: z
+			.object({
+				label: z.string().min(1),
+				format: z.enum(['DD/MM/YYYY', 'DD/MM/YY', 'ISO']),
+			})
+			.optional(),
 		navIsTotal: z.boolean().default(false),
-		// Reject the email's NAV as a method-1 candidate if the email's own `Date` header
-		// is older than this many days relative to the ops claim's createdAt. A stale NAV
-		// report (fund manager hasn't sent an update) must not be attested as current —
-		// falls through to method-2:ops instead (visible in the attestation's
-		// `overcollateralizationType` switching from method-1:vlayer_total to method-2:ops,
-		// no separate staleness flag needed). Default 14 days: generous vs. typical
-		// weekly/bi-weekly reporting cadence, but catches multi-week/month-old staleness.
+		// Bounds how far the report may be from the figures it is compared against. Its exact
+		// meaning depends on whether `valuationDate` is set, because the two cases need
+		// different questions asked:
+		//
+		// - WITHOUT `valuationDate`: maximum absolute age of the report, measured from the ops
+		//   claim. Suits managers who value and send on the same day (Fasanara). Default 14.
+		//
+		// - WITH `valuationDate`: maximum delay between the mail landing and the oracle price
+		//   being pushed from it. Absolute age is meaningless for a fund that values monthly
+		//   and publishes seven weeks later — it is *always* ~54 days behind, by design. What
+		//   must be true is that this report is the one backing the current price, which shows
+		//   up as the oracle updating shortly after the mail. A week is generous for that.
+		//
+		// In both cases a breach invalidates the method-1 candidate and the token falls through
+		// to method-2:ops, visible in the attestation through `overcollateralizationType`.
 		maxEmailStalenessDays: z.number().positive().default(14),
 	})
 	.refine((d) => emailRegex.test(d.expectedEmail) || domainRegex.test(d.expectedEmail), {
@@ -48,6 +97,12 @@ const fundManagerConfigSchema = z
 	.refine((d) => emailRegex.test(d.requiredReceiverEmail), {
 		message: 'Invalid required receiver email',
 		path: ['requiredReceiverEmail'],
+	})
+	// Exactly one NAV source. Neither would silently yield no method-1 candidate; both would
+	// leave the precedence ambiguous to anyone reading the registry.
+	.refine((d) => (d.navFields != null) !== (d.navAttachment != null), {
+		message: 'Provide exactly one of navFields (NAV in the email body) or navAttachment (NAV in a tabular attachment)',
+		path: ['navFields'],
 	})
 
 // Second vlayer-notarized email (optional, parallel to `fundManager`).
@@ -250,6 +305,14 @@ export const configSchema = z
 		ipfsHttpEndpoint: ipfsHttpEndpointSchema,
 		ipfsPinataEndpoint: ipfsPinataEndpointSchema.optional(),
 		attester: attesterConfigSchema,
+		// Claim a reference on our Pinata account to each vlayer proof the workflow fetches.
+		// Our dedicated gateway only serves CIDs pinned to us, so third-party proofs come back
+		// 403 and we fall onto public gateways that are slow and rate-limited — which has
+		// already cost attestations. Pinning makes the dedicated gateway serve the proof from
+		// the next run on, and since fund-manager emails are monthly the same CID is reused for
+		// weeks. Costs one HTTP call per run and is a no-op once the claim-pushing service pins
+		// upstream (see PIN_VLAYER_PROOF_TICKET.md), at which point this can be turned off.
+		pinFetchedVlayerProofs: z.boolean().default(false),
 		overcollateralizationThreshold: z.number().min(0).max(1).default(0.995),
 		oneTokenDeviationThresholdPercent: z.number().min(0).max(100).default(5),
 		// Token registry — fetched at runtime from a public URL.

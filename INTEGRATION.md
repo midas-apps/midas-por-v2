@@ -2,7 +2,9 @@
 
 This document explains how to retrieve and independently audit a Midas Proof-of-Reserves attestation. No code required to read it through; pointers to addresses and IPFS content only.
 
-Each Midas token shown on the Midas website carries a small PoR badge. The badge links to the Ethereum transaction that anchors the latest signed attestation for that token. From that single transaction you can recover the full attestation document and verify the data yourself — Midas supply, CEX exposure, fund-manager NAV, oracle price — without trusting any centralized API.
+Each Midas token shown on the Midas website carries a small PoR badge. The badge links to the Ethereum transaction that anchors the latest signed attestation for that token. From that single transaction you can recover the full signed attestation document — Midas supply, portfolio composition, fund-manager NAV, oracle price — and verify it without going through any Midas API.
+
+Chain-sourced claims (`onchain_supply`, `oracle_price`) are fully reproducible from an EVM RPC. Off-chain claims carry the proof of their own origin — a TLS-Notary proof for fund-manager emails, DON consensus for the portfolio report — which establishes where the figure came from rather than making it independently recomputable.
 
 ---
 
@@ -39,7 +41,7 @@ The two arguments are all you need:
    - `https://cloudflare-ipfs.com/ipfs/<CID>`
 4. Gunzip the response → you get the attestation JSON
 
-A reference snippet (browser, no dependency) is in the [README](./README.md#reading-on-chain-data).
+A reference snippet (browser, no dependency) is in the [README](./README.md#cidv0-helper-for-step-1).
 
 ---
 
@@ -61,11 +63,11 @@ The attestation is a list of independently-sourced claims. Each one tells you wh
 
 | Claim | What it tells you | How to audit it yourself |
 |---|---|---|
-| `onchain_supply` | ERC-20 `totalSupply()` of the Midas token at the attestation time, plus the chain and block reference | Call `totalSupply()` directly on the token contract at the same block |
+| `onchain_supply` | ERC-20 `totalSupply()` of the Midas token, with the token address, chain and `readAt` timestamp | Call `totalSupply()` directly on the token contract at the block matching `readAt` |
 | `ops_claim` | Cross-chain supply and NAV reported by Midas ops | Cross-check against your own chain indexer |
-| `onetoken_report` | Full 1token portfolio breakdown — `assets`, `liabilities`, `equity`, and `_metadata.anchorISO` (the exact snapshot timestamp). Contains per-wallet balances including CEX, custody, OTC | Inspect the wallet list, hit each CEX/custody address directly and confirm the balances |
-| `oracle_price` | Chainlink oracle price + last-updated timestamp | Query the Chainlink aggregator directly |
-| `fund_manager_email` | Vlayer TLS-Notary proof of the NAV email sent by the fund manager (tokens with a vlayer claim only — see the [Supported Tokens](./README.md#supported-tokens) table) | Verify the vlayer proof independently with the vlayer SDK; the proof commits to sender domain, receiver, and email body |
+| `onetoken_report` | 1token portfolio breakdown aggregated by protocol — `assets`, `liabilities`, `equity`, and `_metadata.anchorISO` (the exact snapshot timestamp). Centralised-venue exposure appears under the labels 1token returns (`cex_1`, `cex_2`, …). Address-level detail is not included | Check that `equity` nets out to the reserve figure used in `overcollateralization`, at the `anchorISO` snapshot |
+| `oracle_price` | Oracle price + last-updated timestamp, with the feed address and chain | Query the feed directly — a Chainlink aggregator on EVM chains, a Solana feed for solmFONE / solmHYPER |
+| `fund_manager_claim` | Vlayer TLS-Notary proof of the NAV email sent by the fund manager (tokens with a vlayer claim only — see [Step 5](#step-5--where-the-off-chain-data-lives)). Accompanied by `fund_manager_email_sender_verification` and `fund_manager_email_receiver_verification`, which pin the sender and receiver addresses | Verify the vlayer proof independently with the vlayer SDK; the proof commits to sender domain, receiver, and email body |
 | `email_nav` | NAV value extracted from the fund-manager email, listing which lines were summed | Re-extract from the vlayer-proven email body |
 | `overcollateralization` | The computed coverage ratio, threshold, pass/fail, and the USD reserve / TVL figures | Recompute the ratio from the reserve and supply inputs above |
 
@@ -96,12 +98,14 @@ For tokens whose NAV depends on data outside the chain:
 
 | Source | Tokens | What it produces | Anchored on-chain via |
 |---|---|---|---|
-| Fund-manager email (vlayer TLS-Notary) | mFONE (Fasanara), mM1-USD (M1 Capital), mGLOBAL / mGLO / mGLOeuro (JTC), mWIN (Northern Trust) | Signed NAV + accrued interest / pending redemption lines | `fund_manager_email` + `email_nav` claims |
-| 1token portfolio API | All tokens | Per-wallet asset breakdown (CEX, custody, OTC), equity, navBase | `onetoken_report` claim |
+| Fund-manager email (vlayer TLS-Notary) | mFONE / solmFONE (Fasanara), mM1-USD (M1 Capital), mGLOBAL / mGLO / mGLOeuro (JTC) | Notarised NAV + accrued interest / pending redemption lines | `fund_manager_claim` + `email_nav` claims |
+| 1token portfolio API | All tokens except mAPOLLO | Portfolio composition aggregated by protocol: assets, liabilities, equity, navBase | `onetoken_report` claim |
 | Midas supply endpoint | All tokens | Cross-chain `totalSupply` at the attestation timestamp | `ops_claim` + `onchain_supply` |
-| Chainlink oracle | All tokens with a published price feed | Token price USD | `oracle_price` claim |
+| Price oracle | All tokens with a published price feed — Chainlink aggregators on EVM, Solana feeds for solmFONE / solmHYPER | Token price USD | `oracle_price` claim |
 
-If you only trust an EVM RPC, the `onchain_supply` and `oracle_price` claims are fully reproducible from chain state. The 1token and email claims carry their own cryptographic proof (DON consensus and TLS notary, respectively) so they can be re-checked without trusting Midas.
+If you only trust an EVM RPC, the `onchain_supply` and `oracle_price` claims are fully reproducible from chain state.
+
+The off-chain claims carry their own cryptographic proof, but the two are not equivalent in strength. The fund-manager email is a TLS-Notary proof: you can verify independently that the message really was sent by that domain to that recipient, with that body. The 1token report carries DON consensus, which proves the Chainlink nodes independently retrieved the same figures from 1token at the same snapshot — it removes Midas from the trust path, but the underlying portfolio data still originates from 1token.
 
 ---
 
